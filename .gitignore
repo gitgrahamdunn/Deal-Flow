@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+output/*.xlsx
+data/raw/*
+data/processed/*

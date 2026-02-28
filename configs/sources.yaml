@@ -1,0 +1,34 @@
+sources:
+  aer:
+    enabled: true
+    require_clear_terms: false
+    page_url: "https://www.aer.ca/providing-information/data-and-reports"
+    license_note: "AER public reports/download pages; verify individual dataset usage notices."
+    artifacts:
+      - name: "aer_well_list"
+        url: "https://example.com/aer_wells.csv"
+        file_pattern: "*.csv"
+  open_alberta:
+    enabled: false
+    require_clear_terms: false
+    page_url: "https://open.canada.ca/data/en/dataset?organization=ab"
+    license_note: "Open Government Licence - Alberta (dataset-specific)."
+    artifacts:
+      - name: "open_alberta_oil_gas"
+        url: "https://example.com/open_alberta.csv"
+        file_pattern: "*.csv"
+  petrinex:
+    enabled: true
+    require_clear_terms: false
+    page_url: "https://www.petrinex.ca/public-data"
+    license_note: "Use only publicly posted downloads/endpoints with no authentication."
+    artifacts:
+      - name: "public_monthly_production"
+        url: "https://example.com/petrinex_production.csv"
+        file_pattern: "*.csv"
+  other_free:
+    enabled: false
+    require_clear_terms: true
+    page_url: "https://example.com"
+    license_note: "Disabled by default unless terms are clearly permissive."
+    artifacts: []
