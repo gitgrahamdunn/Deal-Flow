@@ -1,0 +1,5 @@
+production_month,operator_name,oil_bbl,gas_mcf,water_bbl,facility_id,well_id
+2025-12-01,Alpha Energy,3100,1200,100,FAC1,1000111
+2026-01-01,Alpha Energy,3000,1400,120,FAC1,1000111
+2026-01-01,Beta Oil,1500,800,90,FAC2,
+2026-01-01,Gamma Resources,800,500,45,FAC3,1000222
