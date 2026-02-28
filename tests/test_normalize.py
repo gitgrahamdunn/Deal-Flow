@@ -16,3 +16,11 @@ def test_attach_operator_from_wells() -> None:
     wells = pd.DataFrame({"well_id": ["1"], "operator": ["Alpha"]})
     out = attach_operator_from_wells(prod, wells)
     assert out.loc[0, "operator"] == "Alpha"
+
+
+def test_attach_operator_from_wells_normalizes_well_id_types() -> None:
+    prod = pd.DataFrame({"well_id": [1.0, " 2 "], "operator": [None, None]})
+    wells = pd.DataFrame({"well_id": ["1", 2.0], "operator": ["Alpha", "Beta"]})
+    out = attach_operator_from_wells(prod, wells)
+    assert out["operator"].tolist() == ["Alpha", "Beta"]
+    assert out["well_id"].tolist() == ["1", "2"]
