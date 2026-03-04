@@ -1,0 +1,19 @@
+sources:
+  open_alberta:
+    enabled: true
+    kind: csv
+    source_name: open_alberta
+    basis_level: facility
+    url: "https://open.canada.ca/data/dataset/78ab5f4e-0f8e-4f44-9e4e-a80e8f91ddf2/resource/8f85758a-14b0-4979-9f3b-6a5f3386b523/download/monthly-crude-oil-production.csv"
+  aer:
+    enabled: true
+    kind: csv
+    source_name: aer
+    basis_level: well
+    url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st98/alberta-energy-outlook-data.csv"
+  petrinex:
+    enabled: true
+    kind: csv
+    source_name: petrinex
+    basis_level: facility
+    url: "https://www.petrinex.ca/public-data/sample-production.csv"
