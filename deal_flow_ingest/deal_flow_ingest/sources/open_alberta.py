@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-from pathlib import Path
+import logging
 
 import pandas as pd
 
+from deal_flow_ingest.config import SourcePayload
 from deal_flow_ingest.io.downloader import Downloader
 
+LOGGER = logging.getLogger(__name__)
 
-def load(downloader: Downloader, sample_dir: Path, dry_run: bool, refresh: bool, url: str | None) -> pd.DataFrame:
-    if dry_run:
-        return pd.read_csv(sample_dir / "production_sample.csv")
-    if not url:
-        raise ValueError("open_alberta URL missing")
-    file_path = downloader.fetch("open_alberta", url, refresh=refresh).path
-    return pd.read_csv(file_path)
+
+def load_placeholder(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
+    if source.landing_page_url:
+        try:
+            downloader.fetch(source.key, source.landing_page_url, refresh=refresh, file_type="html")
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch Open Alberta landing page: %s", exc)
+    if not source.dataset_url:
+        LOGGER.info("Open Alberta placeholder configured without dataset; returning empty frame")
+        return pd.DataFrame()
+    result = downloader.fetch(source.key, source.dataset_url, refresh=refresh, file_type=source.file_type)
+    return pd.read_csv(result.path)

@@ -1,49 +1,80 @@
 sources:
-  aer_st37_well_list:
+  aer_st37:
     enabled: true
-    kind: csv
     source_name: aer_st37
     local_sample: wells_sample.csv
-    url: "https://example.com/aer/st37.csv"
+    parser_name: aer_st37
+    landing_page_url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st37"
+    dataset_url: ""
+    file_type: txt
+    refresh_frequency: monthly
 
-  aer_licencee_operator_list:
+  aer_spatial_data:
     enabled: true
-    kind: csv
-    source_name: aer_licencee
+    source_name: aer_spatial
+    local_sample: open_alberta_placeholder.csv
+    parser_name: aer_spatial
+    landing_page_url: "https://www.aer.ca/providing-information/data-and-reports/data-and-reports/spatial-data"
+    dataset_url: ""
+    file_type: zip
+    refresh_frequency: periodic
+
+  petrinex_public_data:
+    enabled: true
+    source_name: petrinex_business_associate
     local_sample: operators_sample.csv
-    url: "https://example.com/aer/licencee_operator.csv"
-
-  aer_liability_llr_lca:
-    enabled: true
-    kind: csv
-    source_name: aer_llr
-    local_sample: liability_sample.csv
-    url: "https://example.com/aer/llr_lca.csv"
-
-  petrinex_public_monthly_production:
-    enabled: true
-    kind: csv
-    source_name: petrinex_production
-    local_sample: facility_production_sample.csv
-    url: "https://example.com/petrinex/facility_production.csv"
-
-  petrinex_public_well_facility_bridge:
-    enabled: true
-    kind: csv
-    source_name: petrinex_bridge
-    local_sample: well_facility_bridge_sample.csv
-    url: "https://example.com/petrinex/well_facility_bridge.csv"
+    parser_name: petrinex_public
+    landing_page_url: "https://www.petrinex.ca/public-data"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
 
   petrinex_public_facility_master:
     enabled: true
-    kind: csv
     source_name: petrinex_facility
     local_sample: facility_master_sample.csv
-    url: "https://example.com/petrinex/facility_master.csv"
+    parser_name: petrinex_public
+    landing_page_url: "https://www.petrinex.ca/public-data"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
+
+  petrinex_public_well_facility_bridge:
+    enabled: true
+    source_name: petrinex_bridge
+    local_sample: well_facility_bridge_sample.csv
+    parser_name: petrinex_public
+    landing_page_url: "https://www.petrinex.ca/public-data"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
+
+  petrinex_public_monthly_production:
+    enabled: true
+    source_name: petrinex_production
+    local_sample: facility_production_sample.csv
+    parser_name: petrinex_public
+    landing_page_url: "https://www.petrinex.ca/public-data"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
+
+  aer_liability:
+    enabled: true
+    source_name: aer_llr
+    local_sample: liability_sample.csv
+    parser_name: aer_liability
+    landing_page_url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/licensee-liability-rating-program"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
 
   open_alberta_placeholder:
     enabled: true
-    kind: csv
     source_name: open_alberta
     local_sample: open_alberta_placeholder.csv
-    url: "https://open.alberta.ca/opendata-placeholder.csv"
+    parser_name: open_alberta_placeholder
+    landing_page_url: "https://open.alberta.ca/opendata"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: ad_hoc

@@ -21,7 +21,7 @@ def load_metadata(raw_dir: Path, source: str) -> dict:
     path = metadata_path(raw_dir, source)
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
-    return {}
+    return {"artifacts": {}}
 
 
 def save_metadata(raw_dir: Path, source: str, metadata: dict) -> None:
