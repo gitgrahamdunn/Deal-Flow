@@ -44,10 +44,11 @@ DATASET_KIND_MAP = {
 def load_config(config_path: str | Path) -> AppConfig:
     with open(config_path, "r", encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
-    srcs = {
-        key: SourceEntry(source_name=key, **value)
-        for key, value in (raw.get("sources") or {}).items()
-    }
+    srcs: dict[str, SourceEntry] = {}
+    for key, value in (raw.get("sources") or {}).items():
+        payload = dict(value or {})
+        payload.setdefault("source_name", key)
+        srcs[key] = SourceEntry(**payload)
     return AppConfig(sources=srcs)
 
 
@@ -69,4 +70,10 @@ def iter_enabled_sources(cfg: AppConfig) -> list[SourcePayload]:
 
 
 def get_database_url() -> str:
-    return os.getenv("DATABASE_URL", "sqlite:///./data/deal_flow.db")
+    database_url = os.getenv("DATABASE_URL", "sqlite:///./data/deal_flow.db")
+    if database_url.startswith("sqlite:///"):
+        db_path = Path(database_url.removeprefix("sqlite:///"))
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    return database_url
