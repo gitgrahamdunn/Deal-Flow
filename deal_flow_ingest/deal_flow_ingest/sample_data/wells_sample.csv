@@ -1,4 +1,4 @@
-well_id,operator,spud_date,status
-W1,Acme Oil Ltd.,2024-01-15,ACTIVE
-W2,Bravo Energy Inc,2024-02-20,ACTIVE
-W3,Coyote Resources Co.,2024-03-10,SUSPENDED
+uwi,licensee,status,lsd,section,township,range,meridian,lat,lon
+100011100100W400,Alpha Energy Ltd.,SUSPENDED,10,1,50,8,4,52.101,-114.001
+100022200200W400,Alpha Energy Ltd.,ACTIVE,11,2,50,8,4,52.201,-114.101
+100033300300W400,Beta Petroleum Inc,SHUT-IN,12,3,51,9,4,52.301,-114.201
