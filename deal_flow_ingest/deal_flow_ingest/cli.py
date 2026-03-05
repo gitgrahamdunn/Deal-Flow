@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -40,7 +42,7 @@ from deal_flow_ingest.transform.normalize import month_start, normalize_operator
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="deal_flow_ingest")
+    parser = argparse.ArgumentParser(prog="deal_flow_ingest", description="Run Deal Flow ingestion pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run")
     run.add_argument("--start", type=str)
@@ -50,6 +52,20 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
     return parser.parse_args()
 
+
+
+
+def _configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+
+def _ensure_database_dir() -> None:
+    db_url = get_database_url()
+    if db_url.startswith("sqlite:///"):
+        db_path = Path(db_url.removeprefix("sqlite:///"))
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
 
 def _parse_date(s: str | None, default: date) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date() if s else default
@@ -93,11 +109,14 @@ def _estimate_well_production(fac_prod: pd.DataFrame, bridge: pd.DataFrame) -> p
 
 
 def run_ingestion(args: argparse.Namespace) -> int:
+    LOGGER.info("Starting ingestion run")
+    _ensure_database_dir()
     end = _parse_date(args.end, date.today())
     start = _parse_date(args.start, end - timedelta(days=365))
     started_at = datetime.utcnow()
     run_id = new_run_id()
 
+    LOGGER.info("Loading configuration from %s", args.config)
     cfg = load_config(args.config)
     source_entries = [s for s in iter_enabled_sources(cfg) if s.enabled]
     sample_dir = Path("deal_flow_ingest/deal_flow_ingest/sample_data")
@@ -108,18 +127,24 @@ def run_ingestion(args: argparse.Namespace) -> int:
     sources_failed: dict[str, str] = {}
     row_counts: dict[str, int | dict] = {"source_rows": {}, "loaded": {}}
 
+    LOGGER.info("Enabled sources: %s", [s.key for s in source_entries])
+
     for source in source_entries:
         try:
             df = load_dataset(downloader, sample_dir, source, args.dry_run, args.refresh)
             datasets[source.data_kind] = df
             row_counts["source_rows"][source.key] = int(len(df))
             sources_ok.append(source.key)
+            LOGGER.info("Loaded source %s (%s rows)", source.key, len(df))
         except Exception as exc:
             sources_failed[source.key] = str(exc)
+            LOGGER.exception("Failed to load source %s", source.key)
 
     try:
         upgrade_to_head()
-        engine = get_engine(get_database_url())
+        database_url = get_database_url()
+        LOGGER.info("Using database %s", database_url)
+        engine = get_engine(database_url)
         with engine.begin() as conn:
             operators_raw = pd.concat(
                 [
@@ -159,8 +184,10 @@ def run_ingestion(args: argparse.Namespace) -> int:
             if not bridge_raw.empty:
                 bridge_df["well_id"] = bridge_raw["well_id"].astype(str).map(normalize_uwi)
                 bridge_df["facility_id"] = bridge_raw["facility_id"].astype(str)
-                bridge_df["effective_from"] = pd.to_datetime(bridge_raw.get("effective_from")).dt.date
-                bridge_df["effective_to"] = pd.to_datetime(bridge_raw.get("effective_to")).dt.date
+                bridge_df["effective_from"] = pd.to_datetime(bridge_raw.get("effective_from"), errors="coerce").dt.date
+                bridge_df["effective_to"] = pd.to_datetime(bridge_raw.get("effective_to"), errors="coerce").dt.date
+                bridge_df["effective_from"] = bridge_df["effective_from"].map(lambda v: None if pd.isna(v) else v)
+                bridge_df["effective_to"] = bridge_df["effective_to"].map(lambda v: None if pd.isna(v) else v)
                 bridge_df["source"] = "petrinex_bridge"
             row_counts["loaded"]["bridge_well_facility"] = load_bridge_well_facility(conn, bridge_df)
 
@@ -232,9 +259,17 @@ def run_ingestion(args: argparse.Namespace) -> int:
             row_counts["loaded"]["fact_operator_liability"] = replace_fact_liability(conn, liability_df, "aer_llr")
 
             restart_df = compute_well_restart_scores(wells_df[["well_id", "status"]], well_prod, end)
+            if not restart_df.empty and "flags" in restart_df:
+                restart_df["flags"] = restart_df["flags"].map(
+                    lambda value: json.dumps(value) if isinstance(value, (dict, list)) else value
+                )
             row_counts["loaded"]["fact_well_restart_score"] = replace_fact_restart(conn, restart_df, end)
 
             metrics_df = compute_operator_metrics(op_prod, liability_df, restart_df, wells_df, end)
+            if not metrics_df.empty and "source_notes" in metrics_df:
+                metrics_df["source_notes"] = metrics_df["source_notes"].map(
+                    lambda value: json.dumps(value) if isinstance(value, (dict, list)) else value
+                )
             row_counts["loaded"]["fact_operator_metrics"] = replace_fact_metrics(conn, metrics_df, end)
 
             record_ingestion_run(
@@ -258,6 +293,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
                     "restart_upside_bpd_est", ascending=False
                 ).head(10)
 
+        LOGGER.info("Run succeeded with run_id=%s", run_id)
         print(f"run status: success ({run_id})")
         print(f"sources ok: {sources_ok}")
         print(f"sources failed: {sources_failed}")
@@ -268,6 +304,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
         return 0
 
     except Exception as exc:
+        LOGGER.exception("Pipeline run failed")
         engine = get_engine(get_database_url())
         with engine.begin() as conn:
             record_ingestion_run(
@@ -285,7 +322,11 @@ def run_ingestion(args: argparse.Namespace) -> int:
         return 1
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def main() -> None:
+    _configure_logging()
     args = parse_args()
     if args.command == "run":
         raise SystemExit(run_ingestion(args))
