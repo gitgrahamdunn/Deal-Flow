@@ -126,6 +126,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
     sources_ok: list[str] = []
     sources_failed: dict[str, str] = {}
     row_counts: dict[str, int | dict] = {"source_rows": {}, "loaded": {}}
+    source_summaries: list[dict[str, object]] = []
 
     LOGGER.info("Enabled sources: %s", [s.key for s in source_entries])
 
@@ -135,9 +136,22 @@ def run_ingestion(args: argparse.Namespace) -> int:
             datasets[source.data_kind] = df
             row_counts["source_rows"][source.key] = int(len(df))
             sources_ok.append(source.key)
+            last_result = downloader.last_result
+            source_summaries.append({
+                "source": source.key,
+                "artifact_downloaded": bool(last_result.downloaded) if last_result else False,
+                "rows_parsed": int(len(df)),
+                "load_status": "success",
+            })
             LOGGER.info("Loaded source %s (%s rows)", source.key, len(df))
         except Exception as exc:
             sources_failed[source.key] = str(exc)
+            source_summaries.append({
+                "source": source.key,
+                "artifact_downloaded": False,
+                "rows_parsed": 0,
+                "load_status": f"failed: {exc}",
+            })
             LOGGER.exception("Failed to load source %s", source.key)
 
     try:
@@ -150,6 +164,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
                 [
                     datasets.get("wells", pd.DataFrame()).get("licensee", pd.Series(dtype=str)).rename("name_raw"),
                     datasets.get("facility_master", pd.DataFrame()).get("facility_operator", pd.Series(dtype=str)).rename("name_raw"),
+                    datasets.get("operators", pd.DataFrame()).get("name_raw", pd.Series(dtype=str)).rename("name_raw"),
                     datasets.get("liability", pd.DataFrame()).get("operator", pd.Series(dtype=str)).rename("name_raw"),
                 ],
                 ignore_index=True,
@@ -301,6 +316,11 @@ def run_ingestion(args: argparse.Namespace) -> int:
         print(top_prod[["name_norm", "avg_oil_bpd_30d"]].to_string(index=False) if not top_prod.empty else "none")
         print("top 10 operators by restart_upside_bpd_est")
         print(top_restart[["name_norm", "restart_upside_bpd_est"]].to_string(index=False) if not top_restart.empty else "none")
+        print("source summary")
+        for item in source_summaries:
+            print(
+                f"- {item['source']}: artifact_downloaded={item['artifact_downloaded']} rows={item['rows_parsed']} load={item['load_status']}"
+            )
         return 0
 
     except Exception as exc:
@@ -319,6 +339,11 @@ def run_ingestion(args: argparse.Namespace) -> int:
                 notes="Pipeline failed",
             )
         print(f"run status: failed ({run_id})")
+        print("source summary")
+        for item in source_summaries:
+            print(
+                f"- {item['source']}: artifact_downloaded={item['artifact_downloaded']} rows={item['rows_parsed']} load={item['load_status']}"
+            )
         return 1
 
 
