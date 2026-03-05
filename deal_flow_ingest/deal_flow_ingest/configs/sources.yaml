@@ -1,19 +1,49 @@
 sources:
-  open_alberta:
+  aer_st37_well_list:
+    enabled: true
+    kind: csv
+    source_name: aer_st37
+    local_sample: wells_sample.csv
+    url: "https://example.com/aer/st37.csv"
+
+  aer_licencee_operator_list:
+    enabled: true
+    kind: csv
+    source_name: aer_licencee
+    local_sample: operators_sample.csv
+    url: "https://example.com/aer/licencee_operator.csv"
+
+  aer_liability_llr_lca:
+    enabled: true
+    kind: csv
+    source_name: aer_llr
+    local_sample: liability_sample.csv
+    url: "https://example.com/aer/llr_lca.csv"
+
+  petrinex_public_monthly_production:
+    enabled: true
+    kind: csv
+    source_name: petrinex_production
+    local_sample: facility_production_sample.csv
+    url: "https://example.com/petrinex/facility_production.csv"
+
+  petrinex_public_well_facility_bridge:
+    enabled: true
+    kind: csv
+    source_name: petrinex_bridge
+    local_sample: well_facility_bridge_sample.csv
+    url: "https://example.com/petrinex/well_facility_bridge.csv"
+
+  petrinex_public_facility_master:
+    enabled: true
+    kind: csv
+    source_name: petrinex_facility
+    local_sample: facility_master_sample.csv
+    url: "https://example.com/petrinex/facility_master.csv"
+
+  open_alberta_placeholder:
     enabled: true
     kind: csv
     source_name: open_alberta
-    basis_level: facility
-    url: "https://open.canada.ca/data/dataset/78ab5f4e-0f8e-4f44-9e4e-a80e8f91ddf2/resource/8f85758a-14b0-4979-9f3b-6a5f3386b523/download/monthly-crude-oil-production.csv"
-  aer:
-    enabled: true
-    kind: csv
-    source_name: aer
-    basis_level: well
-    url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st98/alberta-energy-outlook-data.csv"
-  petrinex:
-    enabled: true
-    kind: csv
-    source_name: petrinex
-    basis_level: facility
-    url: "https://www.petrinex.ca/public-data/sample-production.csv"
+    local_sample: open_alberta_placeholder.csv
+    url: "https://open.alberta.ca/opendata-placeholder.csv"
