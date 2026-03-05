@@ -61,6 +61,19 @@ Implemented tables:
 
 `deal_flow_ingest/deal_flow_ingest/sample_data/` contains tiny realistic samples including suspended/shut-in wells and monthly facility production. Dry-run generates operator metrics plus restart candidates without network.
 
+
+## Opportunity scanner (stripper / restart screen)
+
+Use the export command to build a ranked CSV of marginal/suspended well opportunities from existing ingested tables (`dim_well`, `fact_well_production_monthly`, `fact_well_restart_score`, `fact_operator_metrics`).
+
+```bash
+python -m deal_flow_ingest export-opportunities --min-score 30 --limit 250 --output data/exports/well_opportunities.csv
+```
+
+The scanner applies transparent rule-based weighting (restart score, production recency, historical oil presence, and operator distress) and emits explainable `screening_notes` rule flags for each well.
+
+Caveat: this is a first-pass screening tool for review prioritization, not an engineering/economic forecast.
+
 ## Caveats
 
 - Facility-to-well estimated production uses equal allocation across bridged wells and is labeled `is_estimated=true`.

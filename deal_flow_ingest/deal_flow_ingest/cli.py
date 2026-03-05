@@ -33,12 +33,14 @@ from deal_flow_ingest.db.schema import (
     FactOperatorMetrics,
     FactOperatorProductionMonthly,
     FactWellProductionMonthly,
+    FactWellRestartScore,
     get_engine,
 )
 from deal_flow_ingest.io.downloader import Downloader
 from deal_flow_ingest.sources import load_dataset
 from deal_flow_ingest.transform.metrics import compute_operator_metrics, compute_well_restart_scores
 from deal_flow_ingest.transform.normalize import month_start, normalize_operator_name, normalize_uwi
+from deal_flow_ingest.transform.opportunities import compute_well_opportunities
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +52,10 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--refresh", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    export = sub.add_parser("export-opportunities")
+    export.add_argument("--min-score", type=float, default=30.0)
+    export.add_argument("--limit", type=int, default=250)
+    export.add_argument("--output", type=str, default="data/exports/well_opportunities.csv")
     return parser.parse_args()
 
 
@@ -119,7 +125,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
     LOGGER.info("Loading configuration from %s", args.config)
     cfg = load_config(args.config)
     source_entries = [s for s in iter_enabled_sources(cfg) if s.enabled]
-    sample_dir = Path("deal_flow_ingest/deal_flow_ingest/sample_data")
+    sample_dir = Path(__file__).resolve().parent / "sample_data"
     downloader = Downloader(Path("data/raw"))
 
     datasets: dict[str, pd.DataFrame] = {}
@@ -347,6 +353,51 @@ def run_ingestion(args: argparse.Namespace) -> int:
         return 1
 
 
+def export_opportunities(args: argparse.Namespace) -> int:
+    _ensure_database_dir()
+    engine = get_engine(get_database_url())
+    with engine.connect() as conn:
+        wells_df = pd.read_sql(select(DimWell), conn)
+        well_prod_df = pd.read_sql(select(FactWellProductionMonthly), conn)
+        restart_df = pd.read_sql(select(FactWellRestartScore), conn)
+        operator_metrics_df = pd.read_sql(select(FactOperatorMetrics), conn)
+
+    if not restart_df.empty and "as_of_date" in restart_df:
+        as_of_date = pd.to_datetime(restart_df["as_of_date"], errors="coerce").max().date()
+    elif not operator_metrics_df.empty and "as_of_date" in operator_metrics_df:
+        as_of_date = pd.to_datetime(operator_metrics_df["as_of_date"], errors="coerce").max().date()
+    else:
+        as_of_date = date.today()
+
+    opportunities = compute_well_opportunities(
+        wells_df=wells_df,
+        well_prod_df=well_prod_df,
+        restart_df=restart_df,
+        operator_metrics_df=operator_metrics_df,
+        as_of_date=as_of_date,
+    )
+    opportunities = opportunities[opportunities["stripper_score"] >= args.min_score]
+    opportunities = opportunities.sort_values("stripper_score", ascending=False).head(args.limit)
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    opportunities.to_csv(output_path, index=False)
+
+    cols = [
+        "well_id",
+        "operator_id",
+        "current_status",
+        "stripper_score",
+        "opportunity_tier",
+        "restart_score",
+        "months_since_last_production",
+    ]
+    print(f"exported {len(opportunities)} opportunities to {output_path}")
+    print("top 20 opportunities")
+    print(opportunities[cols].head(20).to_string(index=False) if not opportunities.empty else "none")
+    return 0
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -355,3 +406,5 @@ def main() -> None:
     args = parse_args()
     if args.command == "run":
         raise SystemExit(run_ingestion(args))
+    if args.command == "export-opportunities":
+        raise SystemExit(export_opportunities(args))
