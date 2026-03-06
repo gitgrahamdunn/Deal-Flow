@@ -4,8 +4,8 @@ sources:
     source_name: aer_st37
     local_sample: wells_sample.csv
     parser_name: aer_st37
-    landing_page_url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st37"
-    dataset_url: ""
+    landing_page_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st37"
+    dataset_url: ""  # direct downloadable ST37 TXT/ZIP artifact URL (preferred for live ingestion)
     file_type: txt
     refresh_frequency: monthly
 

@@ -92,9 +92,9 @@ Caveat: this is a first-pass screening tool for review prioritization, not an en
 
 The live run mode now includes resilient connectors for Alberta public datasets:
 
-- **AER ST37 List of Wells in Alberta**: pulls ST37 landing metadata and parses configured TXT/CSV artifacts into well identifiers, status, licensee, and legal location fields when available.
-- **Petrinex Alberta Public Data**: supports configurable business associate/operator-like extracts, facility master, well-facility bridge, and monthly production feeds with defensive column validation.
+- **AER ST37 List of Wells in Alberta**: this is the first real connected live source; when `dataset_url` is configured to a direct TXT/ZIP artifact, the loader fetches, extracts (if ZIP), and parses well identifiers, status, licensee, and legal location fields. Landing-page-only mode remains non-fatal and returns zero rows with a warning.
+- **Petrinex Alberta Public Data**: currently remains a live connector skeleton/placeholder until stable artifact URLs are wired.
 - **AER Spatial Data**: fetches configured shapefile ZIP artifacts and extracts them to `data/raw/aer_spatial/`; parsing is intentionally metadata-first with a clean TODO path for geometry enrichment.
-- **AER Liability / Estimated Liability / LCA-style reporting**: loads configured downloadable liability artifacts when present, or logs metadata-only status when only a landing page is configured.
+- **AER Liability / Estimated Liability / LCA-style reporting**: currently remains a live connector skeleton/placeholder until stable artifact URLs are wired.
 
 > Note: public non-op and royalty ownership is not yet available from one clean public source. A future inference layer will be added to estimate these interests using available proxy datasets.
