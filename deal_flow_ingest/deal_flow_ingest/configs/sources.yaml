@@ -6,6 +6,8 @@ sources:
     local_live_file: ""
     parser_name: aer_st37
     landing_page_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st37"
+    alternate_landing_page_urls:
+      - "https://www1.aer.ca/ProductCatalogue/10.html"
     dataset_url: ""
     file_type: txt
     refresh_frequency: monthly
