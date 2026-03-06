@@ -3,6 +3,7 @@ sources:
     enabled: true
     source_name: aer_st37
     local_sample: wells_sample.csv
+    local_live_file: ""
     parser_name: aer_st37
     landing_page_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st37"
     dataset_url: "https://www1.aer.ca/ProductCatalogue/237.html"  # direct downloadable ST37 TXT/ZIP artifact URL (preferred for live ingestion)

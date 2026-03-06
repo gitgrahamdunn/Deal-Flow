@@ -14,6 +14,17 @@ LOGGER = logging.getLogger(__name__)
 
 
 def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
+    local_live_file = (source.local_live_file or "").strip()
+    if local_live_file:
+        local_path = Path(local_live_file).expanduser()
+        if local_path.exists() and local_path.is_file():
+            target_path = _resolve_st37_artifact(local_path, extracted_dir=None)
+            if target_path is None:
+                LOGGER.warning("ST37 local live file did not contain a parseable TXT/CSV file: %s", local_path)
+                return pd.DataFrame()
+            LOGGER.info("Using local live ST37 file: %s", local_path)
+            return _parse_well_table(target_path)
+
     if source.landing_page_url:
         try:
             downloader.fetch(source.key, source.landing_page_url, refresh=refresh, file_type="html")
