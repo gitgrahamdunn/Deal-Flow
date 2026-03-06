@@ -12,6 +12,7 @@ class SourceEntry(BaseModel):
     enabled: bool = True
     source_name: str
     local_sample: str | None = None
+    local_live_file: str | None = None
     parser_name: str = "csv"
     landing_page_url: str | None = None
     dataset_url: str | None = None
@@ -31,6 +32,7 @@ class SourcePayload(BaseModel):
     data_kind: str
     enabled: bool
     local_sample: str | None
+    local_live_file: str | None
     parser_name: str
     landing_page_url: str | None
     dataset_url: str | None
@@ -75,6 +77,7 @@ def iter_enabled_sources(cfg: AppConfig) -> list[SourcePayload]:
                 data_kind=DATASET_KIND_MAP.get(key, "unknown"),
                 enabled=entry.enabled,
                 local_sample=entry.local_sample,
+                local_live_file=entry.local_live_file,
                 parser_name=entry.parser_name,
                 landing_page_url=entry.landing_page_url,
                 dataset_url=entry.dataset_url or entry.url,
