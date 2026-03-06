@@ -29,24 +29,20 @@ def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> p
 
     artifact_url = (source.dataset_url or "").strip()
     discovered_artifact = False
+
+    if not artifact_url and not refresh:
+        cached_url = _load_cached_discovered_artifact_url(downloader, source.key)
+        if cached_url:
+            LOGGER.info("Using cached discovered ST37 artifact URL: %s", cached_url)
+            artifact_url = cached_url
+
     if not artifact_url:
-        if not source.landing_page_url:
-            LOGGER.warning("ST37 source has no landing page URL or dataset_url configured; returning empty dataframe.")
+        discovered_url = _discover_st37_from_landing_pages(downloader, source, refresh=refresh)
+        if not discovered_url:
+            LOGGER.warning("Unable to discover ST37 artifact URL from configured landing pages; returning empty dataframe.")
             return pd.DataFrame()
-        try:
-            landing_page = downloader.fetch(source.key, source.landing_page_url, refresh=refresh, file_type="html")
-            landing_page_html = landing_page.path.read_text(encoding="utf-8", errors="replace")
-            discovered_url = _discover_st37_artifact_url(landing_page_html, source.landing_page_url)
-            if not discovered_url:
-                LOGGER.warning("Unable to discover ST37 text artifact URL from landing page: %s", source.landing_page_url)
-                return pd.DataFrame()
-            LOGGER.info("Discovered ST37 artifact URL: %s", discovered_url)
-            LOGGER.info("Using discovered ST37 artifact URL")
-            artifact_url = discovered_url
-            discovered_artifact = True
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to fetch/parse ST37 landing page %s: %s", source.landing_page_url, exc)
-            return pd.DataFrame()
+        artifact_url = discovered_url
+        discovered_artifact = True
 
     result = downloader.fetch(
         source.key,
@@ -63,8 +59,43 @@ def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> p
 
     parsed = _parse_well_table(target_path)
     if discovered_artifact:
+        _cache_discovered_artifact_url(downloader, source.key, artifact_url)
         LOGGER.info("Parsed %s ST37 rows from discovered artifact", len(parsed.index))
     return parsed
+
+
+def _discover_st37_from_landing_pages(downloader: Downloader, source: SourcePayload, refresh: bool) -> str | None:
+    landing_urls = [u for u in [source.landing_page_url, *(source.alternate_landing_page_urls or [])] if u]
+    for landing_url in landing_urls:
+        LOGGER.info("Attempting ST37 discovery from landing page: %s", landing_url)
+        try:
+            landing_page = downloader.fetch(source.key, landing_url, refresh=refresh, file_type="html")
+            landing_page_html = landing_page.path.read_text(encoding="utf-8", errors="replace")
+            discovered_url = _discover_st37_artifact_url(landing_page_html, landing_url)
+            if discovered_url:
+                LOGGER.info("Discovered ST37 artifact URL from %s: %s", landing_url, discovered_url)
+                return discovered_url
+            LOGGER.warning("No ST37 artifact URL candidates found on landing page: %s", landing_url)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch/parse ST37 landing page %s: %s", landing_url, exc)
+    return None
+
+
+def _load_cached_discovered_artifact_url(downloader: Downloader, source_key: str) -> str | None:
+    meta = downloader._load_metadata(source_key)
+    value = meta.get("discovered_artifact_url")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _cache_discovered_artifact_url(downloader: Downloader, source_key: str, artifact_url: str) -> None:
+    meta = downloader._load_metadata(source_key)
+    cached = meta.get("discovered_artifact_url")
+    if cached == artifact_url:
+        return
+    meta["discovered_artifact_url"] = artifact_url
+    downloader._save_metadata(source_key, meta)
 
 
 class _AnchorParser(HTMLParser):
@@ -100,21 +131,34 @@ def _discover_st37_artifact_url(landing_page_html: str, base_url: str) -> str | 
     parser.feed(landing_page_html)
     candidates: list[tuple[int, str]] = []
     for href, text in parser.links:
-        absolute_url = urljoin(base_url, href)
-        searchable = f"{text} {href}".lower()
+        raw_href = (href or "").strip()
+        if not raw_href:
+            continue
+        lowered_href = raw_href.lower()
+        if lowered_href.startswith("mailto:") or lowered_href.startswith("javascript:"):
+            continue
+
+        absolute_url = urljoin(base_url, raw_href)
+        absolute_lower = absolute_url.lower()
+        searchable = f"{text} {raw_href} {absolute_url}".lower()
+
         if "st37" not in searchable:
             continue
+        if any(token in searchable for token in ["pdf", "shapefile", "shape file", ".shp", " shp "]):
+            continue
+
         score = 0
-        if "text format" in searchable or "text" in searchable:
+        if "wells in alberta" in searchable:
+            score += 8
+        if "text format" in searchable or " text " in searchable:
             score += 6
-        if absolute_url.lower().endswith(".zip") or ".zip" in searchable:
-            score += 4
+        if absolute_lower.endswith(".zip") or ".zip" in searchable:
+            score += 5
         if "txt" in searchable:
-            score += 2
-        if "shape" in searchable or "shp" in searchable:
-            score -= 5
-        if "pdf" in searchable or absolute_url.lower().endswith(".pdf"):
-            score -= 6
+            score += 3
+        if "st37" in searchable:
+            score += 3
+
         candidates.append((score, absolute_url))
 
     if not candidates:

@@ -11,6 +11,16 @@ import requests
 
 from deal_flow_ingest.io.cache import cache_key_from_url, content_sha256, load_metadata, save_metadata
 
+DEFAULT_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-CA,en;q=0.9",
+}
+
 
 @dataclass
 class DownloadResult:
@@ -26,6 +36,14 @@ class Downloader:
     def __init__(self, raw_root: Path):
         self.raw_root = raw_root
         self.last_result: DownloadResult | None = None
+        self.session = requests.Session()
+        self.session.headers.update(DEFAULT_BROWSER_HEADERS)
+
+    def _load_metadata(self, source: str) -> dict:
+        return load_metadata(self.raw_root, source)
+
+    def _save_metadata(self, source: str, metadata: dict) -> None:
+        save_metadata(self.raw_root, source, metadata)
 
     def fetch(
         self,
@@ -49,7 +67,11 @@ class Downloader:
         if not refresh and url_meta.get("last_modified"):
             headers["If-Modified-Since"] = url_meta["last_modified"]
 
-        resp = requests.get(url, headers=headers, timeout=timeout)
+        request_headers = dict(headers)
+        if file_type and file_type.lower() == "html":
+            request_headers.setdefault("Referer", url)
+
+        resp = self.session.get(url, headers=request_headers, timeout=timeout)
         cached_name = url_meta.get("file")
         if resp.status_code == 304 and cached_name:
             cached_path = source_dir / cached_name

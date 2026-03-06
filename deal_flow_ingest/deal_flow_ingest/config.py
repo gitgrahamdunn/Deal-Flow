@@ -15,6 +15,7 @@ class SourceEntry(BaseModel):
     local_live_file: str | None = None
     parser_name: str = "csv"
     landing_page_url: str | None = None
+    alternate_landing_page_urls: list[str] | None = None
     dataset_url: str | None = None
     file_type: str = "csv"
     refresh_frequency: str = "unknown"
@@ -35,6 +36,7 @@ class SourcePayload(BaseModel):
     local_live_file: str | None
     parser_name: str
     landing_page_url: str | None
+    alternate_landing_page_urls: list[str] | None = None
     dataset_url: str | None
     file_type: str
     refresh_frequency: str
@@ -80,6 +82,7 @@ def iter_enabled_sources(cfg: AppConfig) -> list[SourcePayload]:
                 local_live_file=entry.local_live_file,
                 parser_name=entry.parser_name,
                 landing_page_url=entry.landing_page_url,
+                alternate_landing_page_urls=entry.alternate_landing_page_urls,
                 dataset_url=entry.dataset_url or entry.url,
                 file_type=entry.file_type or entry.kind or "csv",
                 refresh_frequency=entry.refresh_frequency,

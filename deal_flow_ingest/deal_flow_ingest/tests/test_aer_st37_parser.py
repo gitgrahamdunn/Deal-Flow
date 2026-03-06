@@ -80,17 +80,22 @@ class _FakeResult:
 
 
 class _FakeDownloader:
-    def __init__(self, landing_path: Path, zip_path: Path, extracted_dir: Path):
-        self.landing_path = landing_path
-        self.zip_path = zip_path
-        self.extracted_dir = extracted_dir
+    def __init__(self, responses: dict[str, _FakeResult]):
+        self.responses = responses
+        self.calls: list[str] = []
 
     def fetch(self, _source: str, url: str, **_kwargs):
-        if url.endswith("/st37"):
-            return _FakeResult(self.landing_path)
-        if url.endswith("ST37-Text.zip"):
-            return _FakeResult(self.zip_path, extracted_dir=self.extracted_dir)
-        raise AssertionError(f"Unexpected url requested: {url}")
+        self.calls.append(url)
+        result = self.responses.get(url)
+        if result is None:
+            raise AssertionError(f"Unexpected url requested: {url}")
+        return result
+
+    def _load_metadata(self, _source: str) -> dict:
+        return {}
+
+    def _save_metadata(self, _source: str, _meta: dict) -> None:
+        return None
 
 
 def test_load_st37_uses_discovered_artifact_when_dataset_url_missing(tmp_path: Path):
@@ -128,10 +133,145 @@ def test_load_st37_uses_discovered_artifact_when_dataset_url_missing(tmp_path: P
     )
 
     parsed = load_st37(
-        downloader=_FakeDownloader(landing_path=landing, zip_path=zip_path, extracted_dir=extracted_dir),
+        downloader=_FakeDownloader(
+            responses={
+                "https://www.aer.ca/data-and-performance-reports/statistical-reports/st37": _FakeResult(landing),
+                "https://www.aer.ca/files/ST37-Text.zip": _FakeResult(zip_path, extracted_dir=extracted_dir),
+            }
+        ),
         source=source,
         refresh=False,
     )
 
     assert not parsed.empty
     assert parsed.iloc[0]["uwi"] == "00/12-34-056-07W4"
+
+
+def test_load_st37_falls_back_to_alternate_landing_page(tmp_path: Path):
+    alt_landing = tmp_path / "landing_alt.html"
+    alt_landing.write_text(
+        '<a href="/files/ST37-Wells-in-Alberta-Text.zip">ST37 Wells in Alberta Text Format [ZIP]</a>',
+        encoding="utf-8",
+    )
+
+    extracted_dir = tmp_path / "extracted_alt"
+    extracted_dir.mkdir()
+    extracted_txt = extracted_dir / "st37_alt.txt"
+    extracted_txt.write_text("uwi|status|licensee\n00/01-01-001-01W4|ACTIVE|BETA\n", encoding="utf-8")
+
+    zip_path = tmp_path / "ST37-Wells-in-Alberta-Text.zip"
+    with ZipFile(zip_path, "w") as archive:
+        archive.write(extracted_txt, arcname="st37_alt.txt")
+
+    downloader = _FakeDownloader(
+        responses={
+            "https://www1.aer.ca/ProductCatalogue/10.html": _FakeResult(alt_landing),
+            "https://www1.aer.ca/files/ST37-Wells-in-Alberta-Text.zip": _FakeResult(zip_path, extracted_dir=extracted_dir),
+        }
+    )
+
+    source = SourcePayload(
+        key="aer_st37",
+        source_name="aer_st37",
+        data_kind="wells",
+        enabled=True,
+        local_sample=None,
+        local_live_file="",
+        parser_name="aer_st37",
+        landing_page_url="https://www.aer.ca/data-and-performance-reports/statistical-reports/st37",
+        alternate_landing_page_urls=["https://www1.aer.ca/ProductCatalogue/10.html"],
+        dataset_url="",
+        file_type="zip",
+        refresh_frequency="monthly",
+    )
+
+    parsed = load_st37(downloader=downloader, source=source, refresh=False)
+
+    assert len(parsed) == 1
+    assert parsed.iloc[0]["uwi"] == "00/01-01-001-01W4"
+    assert downloader.calls[0].endswith("/st37")
+    assert downloader.calls[1].endswith("10.html")
+
+
+def test_load_st37_prefers_cached_discovered_artifact_url(tmp_path: Path):
+    txt = tmp_path / "cached.txt"
+    txt.write_text("uwi|status|licensee\n00/02-02-002-02W4|ACTIVE|GAMMA\n", encoding="utf-8")
+
+    class _CachedDownloader(_FakeDownloader):
+        def __init__(self):
+            super().__init__(responses={"https://cached.example.com/st37.txt": _FakeResult(txt)})
+
+        def _load_metadata(self, _source: str) -> dict:
+            return {"discovered_artifact_url": "https://cached.example.com/st37.txt"}
+
+    source = SourcePayload(
+        key="aer_st37",
+        source_name="aer_st37",
+        data_kind="wells",
+        enabled=True,
+        local_sample=None,
+        local_live_file="",
+        parser_name="aer_st37",
+        landing_page_url="https://www.aer.ca/data-and-performance-reports/statistical-reports/st37",
+        alternate_landing_page_urls=["https://www1.aer.ca/ProductCatalogue/10.html"],
+        dataset_url="",
+        file_type="txt",
+        refresh_frequency="monthly",
+    )
+
+    downloader = _CachedDownloader()
+    parsed = load_st37(downloader=downloader, source=source, refresh=False)
+
+    assert len(parsed) == 1
+    assert downloader.calls == ["https://cached.example.com/st37.txt"]
+
+
+def test_load_st37_persists_discovered_artifact_url(tmp_path: Path):
+    landing = tmp_path / "landing_cache.html"
+    landing.write_text('<a href="/files/ST37-Text.zip">ST37 Text Format [ZIP]</a>', encoding="utf-8")
+
+    extracted_dir = tmp_path / "cache_extract"
+    extracted_dir.mkdir()
+    data = extracted_dir / "st37_cached.txt"
+    data.write_text("uwi|status|licensee\n00/03-03-003-03W4|ACTIVE|DELTA\n", encoding="utf-8")
+
+    zip_path = tmp_path / "ST37-Text.zip"
+    with ZipFile(zip_path, "w") as archive:
+        archive.write(data, arcname="st37_cached.txt")
+
+    class _PersistingDownloader(_FakeDownloader):
+        def __init__(self):
+            super().__init__(
+                responses={
+                    "https://www.aer.ca/data-and-performance-reports/statistical-reports/st37": _FakeResult(landing),
+                    "https://www.aer.ca/files/ST37-Text.zip": _FakeResult(zip_path, extracted_dir=extracted_dir),
+                }
+            )
+            self.meta = {}
+
+        def _load_metadata(self, _source: str) -> dict:
+            return dict(self.meta)
+
+        def _save_metadata(self, _source: str, meta: dict) -> None:
+            self.meta = dict(meta)
+
+    source = SourcePayload(
+        key="aer_st37",
+        source_name="aer_st37",
+        data_kind="wells",
+        enabled=True,
+        local_sample=None,
+        local_live_file="",
+        parser_name="aer_st37",
+        landing_page_url="https://www.aer.ca/data-and-performance-reports/statistical-reports/st37",
+        alternate_landing_page_urls=None,
+        dataset_url="",
+        file_type="zip",
+        refresh_frequency="monthly",
+    )
+
+    downloader = _PersistingDownloader()
+    parsed = load_st37(downloader=downloader, source=source, refresh=False)
+
+    assert len(parsed) == 1
+    assert downloader.meta["discovered_artifact_url"] == "https://www.aer.ca/files/ST37-Text.zip"

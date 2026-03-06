@@ -92,7 +92,7 @@ Caveat: this is a first-pass screening tool for review prioritization, not an en
 
 The live run mode now includes resilient connectors for Alberta public datasets:
 
-- **AER ST37 List of Wells in Alberta**: live mode resolves in this order: `local_live_file` (if configured and present), then `dataset_url` (if configured), then automatic discovery of the current Text Format ZIP from the official ST37 landing page. The loader fetches, extracts (if ZIP), and parses well identifiers, status, licensee, and legal location fields. If discovery fails, the connector logs a warning and returns zero rows.
+- **AER ST37 List of Wells in Alberta**: live mode resolves in this order: `local_live_file` (if configured and present), then `dataset_url` (if configured), then automatic discovery from the official ST37 landing page, then configured alternate landing pages. Once a live artifact URL is discovered it is cached in source metadata and reused on subsequent non-refresh runs. The loader fetches, extracts (if ZIP), and parses well identifiers, status, licensee, and legal location fields. If discovery fails, the connector logs a warning and returns zero rows.
 - **Petrinex Alberta Public Data**: currently remains a live connector skeleton/placeholder until stable artifact URLs are wired.
 - **AER Spatial Data**: fetches configured shapefile ZIP artifacts and extracts them to `data/raw/aer_spatial/`; parsing is intentionally metadata-first with a clean TODO path for geometry enrichment.
 - **AER Liability / Estimated Liability / LCA-style reporting**: currently remains a live connector skeleton/placeholder until stable artifact URLs are wired.
