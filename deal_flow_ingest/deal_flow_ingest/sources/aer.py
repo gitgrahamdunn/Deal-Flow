@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin
 from zipfile import BadZipFile, ZipFile
 
 import pandas as pd
@@ -25,23 +27,33 @@ def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> p
             LOGGER.info("Using local live ST37 file: %s", local_path)
             return _parse_well_table(target_path)
 
-    if source.landing_page_url:
+    artifact_url = (source.dataset_url or "").strip()
+    discovered_artifact = False
+    if not artifact_url:
+        if not source.landing_page_url:
+            LOGGER.warning("ST37 source has no landing page URL or dataset_url configured; returning empty dataframe.")
+            return pd.DataFrame()
         try:
-            downloader.fetch(source.key, source.landing_page_url, refresh=refresh, file_type="html")
+            landing_page = downloader.fetch(source.key, source.landing_page_url, refresh=refresh, file_type="html")
+            landing_page_html = landing_page.path.read_text(encoding="utf-8", errors="replace")
+            discovered_url = _discover_st37_artifact_url(landing_page_html, source.landing_page_url)
+            if not discovered_url:
+                LOGGER.warning("Unable to discover ST37 text artifact URL from landing page: %s", source.landing_page_url)
+                return pd.DataFrame()
+            LOGGER.info("Discovered ST37 artifact URL: %s", discovered_url)
+            LOGGER.info("Using discovered ST37 artifact URL")
+            artifact_url = discovered_url
+            discovered_artifact = True
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to fetch ST37 landing page %s: %s", source.landing_page_url, exc)
-    if not source.dataset_url:
-        LOGGER.warning(
-            "ST37 source has no dataset_url configured. Landing page metadata fetched only; returning empty dataframe."
-        )
-        return pd.DataFrame()
+            LOGGER.warning("Failed to fetch/parse ST37 landing page %s: %s", source.landing_page_url, exc)
+            return pd.DataFrame()
 
     result = downloader.fetch(
         source.key,
-        source.dataset_url,
+        artifact_url,
         refresh=refresh,
-        file_type=source.file_type,
-        extract_zip=(source.file_type or "").lower() == "zip",
+        file_type=_guess_artifact_file_type(artifact_url, source.file_type),
+        extract_zip=artifact_url.lower().endswith(".zip") or (source.file_type or "").lower() == "zip",
     )
 
     target_path = _resolve_st37_artifact(result.path, result.extracted_dir)
@@ -49,7 +61,77 @@ def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> p
         LOGGER.warning("ST37 artifact did not contain a parseable TXT/CSV file: %s", result.path)
         return pd.DataFrame()
 
-    return _parse_well_table(target_path)
+    parsed = _parse_well_table(target_path)
+    if discovered_artifact:
+        LOGGER.info("Parsed %s ST37 rows from discovered artifact", len(parsed.index))
+    return parsed
+
+
+class _AnchorParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._current_href: str | None = None
+        self._current_text_parts: list[str] = []
+        self.links: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attr_map = dict(attrs)
+        href = attr_map.get("href")
+        if href:
+            self._current_href = href
+            self._current_text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current_href is not None:
+            self._current_text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or self._current_href is None:
+            return
+        self.links.append((self._current_href, " ".join(self._current_text_parts).strip()))
+        self._current_href = None
+        self._current_text_parts = []
+
+
+def _discover_st37_artifact_url(landing_page_html: str, base_url: str) -> str | None:
+    parser = _AnchorParser()
+    parser.feed(landing_page_html)
+    candidates: list[tuple[int, str]] = []
+    for href, text in parser.links:
+        absolute_url = urljoin(base_url, href)
+        searchable = f"{text} {href}".lower()
+        if "st37" not in searchable:
+            continue
+        score = 0
+        if "text format" in searchable or "text" in searchable:
+            score += 6
+        if absolute_url.lower().endswith(".zip") or ".zip" in searchable:
+            score += 4
+        if "txt" in searchable:
+            score += 2
+        if "shape" in searchable or "shp" in searchable:
+            score -= 5
+        if "pdf" in searchable or absolute_url.lower().endswith(".pdf"):
+            score -= 6
+        candidates.append((score, absolute_url))
+
+    if not candidates:
+        return None
+
+    best_score, best_url = max(candidates, key=lambda item: item[0])
+    if best_score <= 0:
+        return None
+    return best_url
+
+
+def _guess_artifact_file_type(url: str, default_file_type: str) -> str:
+    lowered = url.lower()
+    for token in ["zip", "txt", "csv", "html", "pdf"]:
+        if lowered.endswith(f".{token}"):
+            return token
+    return default_file_type
 
 
 def load_spatial(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
@@ -156,7 +238,7 @@ def _pick_best_zip_member(members: list[str]) -> str:
     text_like = [m for m in members if m.lower().endswith((".txt", ".csv"))]
     if not text_like:
         raise KeyError("No text-like member found in ZIP")
-    preferred = sorted(text_like, key=lambda m: (0 if m.lower().endswith(".txt") else 1, len(m)))
+    preferred = sorted(text_like, key=lambda m: _st37_candidate_priority(Path(m)))
     return preferred[0]
 
 
@@ -164,8 +246,18 @@ def _find_best_text_candidate(extracted_dir: Path) -> Path | None:
     files = [p for p in extracted_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".txt", ".csv"}]
     if not files:
         return None
-    txt = [f for f in files if f.suffix.lower() == ".txt"]
-    return sorted(txt or files, key=lambda p: len(str(p)))[0]
+    return sorted(files, key=_st37_candidate_priority)[0]
+
+
+def _st37_candidate_priority(path: Path) -> tuple[int, int, str]:
+    name = path.name.lower()
+    if path.suffix.lower() == ".txt" and "st37" in name:
+        return (0, len(name), name)
+    if path.suffix.lower() == ".txt":
+        return (1, len(name), name)
+    if path.suffix.lower() == ".csv":
+        return (2, len(name), name)
+    return (3, len(name), name)
 
 
 def _parse_st37_text(path: Path) -> pd.DataFrame:
