@@ -23,7 +23,7 @@ def test_pipeline_idempotency(tmp_path: Path):
         end="2025-03-31",
         refresh=False,
         dry_run=True,
-        config="deal_flow_ingest/configs/sources.yaml",
+        config="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml",
     )
     assert run_ingestion(args) == 0
     first_counts = {

@@ -43,6 +43,42 @@ from deal_flow_ingest.transform.normalize import month_start, normalize_operator
 from deal_flow_ingest.transform.opportunities import compute_well_opportunities
 
 
+WELL_DIM_COLUMNS = [
+    "well_id",
+    "uwi_raw",
+    "status",
+    "licensee_operator_id",
+    "lsd",
+    "section",
+    "township",
+    "range",
+    "meridian",
+    "lat",
+    "lon",
+    "first_seen",
+    "last_seen",
+    "source",
+]
+WELL_STATUS_COLUMNS = ["well_id", "status"]
+FACILITY_PROD_COLUMNS = ["month", "facility_id", "oil_bbl", "gas_mcf", "water_bbl", "condensate_bbl", "source"]
+BRIDGE_COLUMNS = ["well_id", "facility_id", "effective_from", "effective_to", "source"]
+OPERATOR_PROD_COLUMNS = ["month", "operator_id", "oil_bbl", "gas_mcf", "water_bbl", "basis_level", "source"]
+LIABILITY_COLUMNS = [
+    "as_of_date",
+    "operator_id",
+    "inactive_wells",
+    "active_wells",
+    "deemed_assets",
+    "deemed_liabilities",
+    "ratio",
+    "source",
+]
+
+
+def _empty_df(columns: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(columns=columns)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="deal_flow_ingest", description="Run Deal Flow ingestion pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -79,7 +115,7 @@ def _parse_date(s: str | None, default: date) -> date:
 
 def _prep_wells(df: pd.DataFrame, op_map: dict[str, int], source: str, as_of: date) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame()
+        return _empty_df(WELL_DIM_COLUMNS)
     out = pd.DataFrame()
     out["uwi_raw"] = df["uwi"].astype(str)
     out["well_id"] = out["uwi_raw"].map(normalize_uwi)
@@ -100,7 +136,7 @@ def _prep_wells(df: pd.DataFrame, op_map: dict[str, int], source: str, as_of: da
 
 def _estimate_well_production(fac_prod: pd.DataFrame, bridge: pd.DataFrame) -> pd.DataFrame:
     if fac_prod.empty or bridge.empty:
-        return pd.DataFrame(columns=["month", "well_id", "oil_bbl", "gas_mcf", "water_bbl", "source", "is_estimated"])
+        return _empty_df(["month", "well_id", "oil_bbl", "gas_mcf", "water_bbl", "source", "is_estimated"])
     merged = fac_prod.merge(bridge[["facility_id", "well_id"]], on="facility_id", how="inner")
     counts = merged.groupby(["month", "facility_id"])["well_id"].transform("count").replace(0, 1)
     merged["oil_bbl"] = merged["oil_bbl"] / counts
@@ -201,7 +237,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
             row_counts["loaded"]["dim_facility"] = upsert_dim_facility(conn, fac_df)
 
             bridge_raw = datasets.get("well_facility_bridge", pd.DataFrame())
-            bridge_df = pd.DataFrame()
+            bridge_df = _empty_df(BRIDGE_COLUMNS)
             if not bridge_raw.empty:
                 bridge_df["well_id"] = bridge_raw["well_id"].astype(str).map(normalize_uwi)
                 bridge_df["facility_id"] = bridge_raw["facility_id"].astype(str)
@@ -213,7 +249,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
             row_counts["loaded"]["bridge_well_facility"] = load_bridge_well_facility(conn, bridge_df)
 
             fac_prod_raw = datasets.get("facility_production", pd.DataFrame())
-            fac_prod = pd.DataFrame()
+            fac_prod = _empty_df(FACILITY_PROD_COLUMNS)
             if not fac_prod_raw.empty:
                 fac_prod["month"] = month_start(fac_prod_raw["month"]).dt.date
                 fac_prod["facility_id"] = fac_prod_raw["facility_id"].astype(str)
@@ -227,7 +263,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
             )
 
             well_prod_raw = datasets.get("well_production", pd.DataFrame())
-            well_prod = pd.DataFrame()
+            well_prod = _empty_df(["month", "well_id", "oil_bbl", "gas_mcf", "water_bbl", "source", "is_estimated"])
             if not well_prod_raw.empty:
                 well_prod["month"] = month_start(well_prod_raw["month"]).dt.date
                 well_prod["well_id"] = well_prod_raw["well_id"].astype(str).map(normalize_uwi)
@@ -244,14 +280,18 @@ def run_ingestion(args: argparse.Namespace) -> int:
                 conn, FactWellProductionMonthly, well_prod, well_prod["source"].iloc[0] if not well_prod.empty else "well_metered", start, end
             )
 
-            status_df = wells_df[["well_id", "status"]].copy() if not wells_df.empty else pd.DataFrame(columns=["well_id", "status"])
+            status_df = wells_df[WELL_STATUS_COLUMNS].copy() if not wells_df.empty else _empty_df(WELL_STATUS_COLUMNS)
             if not status_df.empty:
                 status_df["status_date"] = end
                 status_df["source"] = "aer_st37"
             row_counts["loaded"]["fact_well_status"] = replace_fact_well_status(conn, status_df, "aer_st37")
 
-            fac_to_op = fac_df[["facility_id", "facility_operator_id"]].rename(columns={"facility_operator_id": "operator_id"}) if not fac_df.empty else pd.DataFrame(columns=["facility_id", "operator_id"])
-            op_prod = fac_prod.merge(fac_to_op, on="facility_id", how="left") if not fac_prod.empty else pd.DataFrame()
+            fac_to_op = (
+                fac_df[["facility_id", "facility_operator_id"]].rename(columns={"facility_operator_id": "operator_id"})
+                if not fac_df.empty
+                else _empty_df(["facility_id", "operator_id"])
+            )
+            op_prod = fac_prod.merge(fac_to_op, on="facility_id", how="left") if not fac_prod.empty else _empty_df(OPERATOR_PROD_COLUMNS)
             if not op_prod.empty:
                 op_prod = (
                     op_prod.groupby(["month", "operator_id"], as_index=False)[["oil_bbl", "gas_mcf", "water_bbl"]]
@@ -260,12 +300,14 @@ def run_ingestion(args: argparse.Namespace) -> int:
                 )
                 op_prod = op_prod[op_prod["operator_id"].notna()]
                 op_prod["operator_id"] = op_prod["operator_id"].astype(int)
+            else:
+                op_prod = _empty_df(OPERATOR_PROD_COLUMNS)
             row_counts["loaded"]["fact_operator_production_monthly"] = replace_fact_operator_prod(
                 conn, op_prod, "petrinex_public", start, end
             )
 
             liability_raw = datasets.get("liability", pd.DataFrame())
-            liability_df = pd.DataFrame()
+            liability_df = _empty_df(LIABILITY_COLUMNS)
             if not liability_raw.empty:
                 liability_df["as_of_date"] = pd.to_datetime(liability_raw["as_of_date"]).dt.date
                 liability_df["operator_id"] = liability_raw["operator"].astype(str).map(normalize_operator_name).map(operator_map)
@@ -279,7 +321,8 @@ def run_ingestion(args: argparse.Namespace) -> int:
                 liability_df["operator_id"] = liability_df["operator_id"].astype(int)
             row_counts["loaded"]["fact_operator_liability"] = replace_fact_liability(conn, liability_df, "aer_llr")
 
-            restart_df = compute_well_restart_scores(wells_df[["well_id", "status"]], well_prod, end)
+            restart_input = wells_df[WELL_STATUS_COLUMNS].copy() if not wells_df.empty else _empty_df(WELL_STATUS_COLUMNS)
+            restart_df = compute_well_restart_scores(restart_input, well_prod, end)
             if not restart_df.empty and "flags" in restart_df:
                 restart_df["flags"] = restart_df["flags"].map(
                     lambda value: json.dumps(value) if isinstance(value, (dict, list)) else value
@@ -292,6 +335,9 @@ def run_ingestion(args: argparse.Namespace) -> int:
                     lambda value: json.dumps(value) if isinstance(value, (dict, list)) else value
                 )
             row_counts["loaded"]["fact_operator_metrics"] = replace_fact_metrics(conn, metrics_df, end)
+
+            if sum(int(v) for v in row_counts.get("source_rows", {}).values()) == 0:
+                print("No live source rows were parsed; pipeline completed with empty data.")
 
             record_ingestion_run(
                 conn,
@@ -331,6 +377,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
 
     except Exception as exc:
         LOGGER.exception("Pipeline run failed")
+        print(f"Pipeline run failed: {exc}")
         engine = get_engine(get_database_url())
         with engine.begin() as conn:
             record_ingestion_run(
