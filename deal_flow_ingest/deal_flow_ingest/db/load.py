@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
+from itertools import islice
 from uuid import uuid4
 
 import pandas as pd
@@ -23,6 +25,73 @@ from deal_flow_ingest.db.schema import (
     IngestionRun,
 )
 from deal_flow_ingest.transform.normalize import normalize_operator_name
+
+
+logger = logging.getLogger(__name__)
+
+SQLITE_LOOKUP_CHUNK_SIZE = 500
+SQLITE_INSERT_CHUNK_SIZE = 500
+POSTGRES_LOOKUP_CHUNK_SIZE = 5000
+POSTGRES_INSERT_CHUNK_SIZE = 5000
+
+
+def chunked(iterable, size: int):
+    iterator = iter(iterable)
+    while True:
+        batch = list(islice(iterator, size))
+        if not batch:
+            break
+        yield batch
+
+
+def _dialect_name(conn: Connection) -> str:
+    return conn.engine.dialect.name.lower()
+
+
+def _lookup_chunk_size(conn: Connection) -> int:
+    return SQLITE_LOOKUP_CHUNK_SIZE if _dialect_name(conn) == "sqlite" else POSTGRES_LOOKUP_CHUNK_SIZE
+
+
+def _insert_chunk_size(conn: Connection) -> int:
+    return SQLITE_INSERT_CHUNK_SIZE if _dialect_name(conn) == "sqlite" else POSTGRES_INSERT_CHUNK_SIZE
+
+
+def _execute_insert_in_chunks(conn: Connection, model, payload: list[dict], label: str) -> int:
+    if not payload:
+        return 0
+    chunk_size = _insert_chunk_size(conn)
+    total_chunks = (len(payload) + chunk_size - 1) // chunk_size
+    logger.info("Loading %s in chunks of %s (%s rows)", label, chunk_size, len(payload))
+    for idx, rows in enumerate(chunked(payload, chunk_size), start=1):
+        conn.execute(insert(model), rows)
+        if idx == 1 or idx == total_chunks or idx % 25 == 0:
+            logger.info("Inserted chunk %s/%s into %s", idx, total_chunks, label)
+    return len(payload)
+
+
+def _fetch_existing_values_in_chunks(conn: Connection, column, values: list[str]) -> set[str]:
+    existing: set[str] = set()
+    chunk_size = _lookup_chunk_size(conn)
+    for chunk in chunked(values, chunk_size):
+        existing.update(r[0] for r in conn.execute(select(column).where(column.in_(chunk))))
+    return existing
+
+
+def _delete_in_values_chunks(conn: Connection, model, column, values: list, extra_predicates: tuple = ()) -> None:
+    if not values:
+        return
+    chunk_size = _lookup_chunk_size(conn)
+    for chunk in chunked(values, chunk_size):
+        predicates = (column.in_(chunk), *extra_predicates)
+        conn.execute(delete(model).where(*predicates))
+
+
+def _delete_tuple_in_chunks(conn: Connection, model, columns: tuple, key_tuples: list[tuple]) -> None:
+    if not key_tuples:
+        return
+    chunk_size = _lookup_chunk_size(conn)
+    for chunk in chunked(key_tuples, chunk_size):
+        conn.execute(delete(model).where(tuple_(*columns).in_(chunk)))
 
 
 def _json_payload(value):
@@ -50,7 +119,7 @@ def upsert_dim_operator(conn: Connection, df: pd.DataFrame, entity_type: str = "
                 }
             )
     if to_insert:
-        conn.execute(insert(DimOperator), to_insert)
+        _execute_insert_in_chunks(conn, DimOperator, to_insert, "dim_operator")
 
     mapping = {r.name_norm: r.operator_id for r in conn.execute(select(DimOperator.name_norm, DimOperator.operator_id))}
     return mapping
@@ -60,11 +129,11 @@ def upsert_dim_well(conn: Connection, wells_df: pd.DataFrame) -> int:
     if wells_df.empty:
         return 0
     keys = wells_df["well_id"].dropna().astype(str).unique().tolist()
-    existing = {r.well_id for r in conn.execute(select(DimWell.well_id).where(DimWell.well_id.in_(keys)))}
+    existing = _fetch_existing_values_in_chunks(conn, DimWell.well_id, keys)
     inserts = wells_df[~wells_df["well_id"].isin(existing)].to_dict(orient="records")
     updates = wells_df[wells_df["well_id"].isin(existing)].to_dict(orient="records")
     if inserts:
-        conn.execute(insert(DimWell), inserts)
+        _execute_insert_in_chunks(conn, DimWell, inserts, "dim_well")
     for row in updates:
         conn.execute(
             DimWell.__table__.update().where(DimWell.well_id == row["well_id"]).values(**{k: v for k, v in row.items() if k != "well_id"})
@@ -76,11 +145,11 @@ def upsert_dim_facility(conn: Connection, fac_df: pd.DataFrame) -> int:
     if fac_df.empty:
         return 0
     keys = fac_df["facility_id"].dropna().astype(str).unique().tolist()
-    existing = {r.facility_id for r in conn.execute(select(DimFacility.facility_id).where(DimFacility.facility_id.in_(keys)))}
+    existing = _fetch_existing_values_in_chunks(conn, DimFacility.facility_id, keys)
     inserts = fac_df[~fac_df["facility_id"].isin(existing)].to_dict(orient="records")
     updates = fac_df[fac_df["facility_id"].isin(existing)].to_dict(orient="records")
     if inserts:
-        conn.execute(insert(DimFacility), inserts)
+        _execute_insert_in_chunks(conn, DimFacility, inserts, "dim_facility")
     for row in updates:
         conn.execute(
             DimFacility.__table__.update().where(DimFacility.facility_id == row["facility_id"]).values(
@@ -95,23 +164,20 @@ def load_bridge_well_facility(conn: Connection, bridge_df: pd.DataFrame) -> int:
         return 0
     keys = bridge_df[["well_id", "facility_id", "effective_from"]].drop_duplicates()
     key_tuples = [tuple(x) for x in keys.to_records(index=False)]
-    if key_tuples:
-        conn.execute(
-            delete(BridgeWellFacility).where(
-                tuple_(BridgeWellFacility.well_id, BridgeWellFacility.facility_id, BridgeWellFacility.effective_from).in_(key_tuples)
-            )
-        )
+    _delete_tuple_in_chunks(
+        conn,
+        BridgeWellFacility,
+        (BridgeWellFacility.well_id, BridgeWellFacility.facility_id, BridgeWellFacility.effective_from),
+        key_tuples,
+    )
     payload = bridge_df.to_dict(orient="records")
-    conn.execute(insert(BridgeWellFacility), payload)
-    return len(payload)
+    return _execute_insert_in_chunks(conn, BridgeWellFacility, payload, "bridge_well_facility")
 
 
 def replace_fact_by_month_range(conn: Connection, model, df: pd.DataFrame, source: str, start: date, end: date) -> int:
     conn.execute(delete(model).where(model.month >= start, model.month <= end, model.source == source))
     payload = df.to_dict(orient="records")
-    if payload:
-        conn.execute(insert(model), payload)
-    return len(payload)
+    return _execute_insert_in_chunks(conn, model, payload, model.__tablename__)
 
 
 def replace_fact_operator_prod(conn: Connection, df: pd.DataFrame, source: str, start: date, end: date) -> int:
@@ -123,19 +189,16 @@ def replace_fact_operator_prod(conn: Connection, df: pd.DataFrame, source: str, 
         )
     )
     payload = df.to_dict(orient="records")
-    if payload:
-        conn.execute(insert(FactOperatorProductionMonthly), payload)
-    return len(payload)
+    return _execute_insert_in_chunks(conn, FactOperatorProductionMonthly, payload, FactOperatorProductionMonthly.__tablename__)
 
 
 def replace_fact_liability(conn: Connection, df: pd.DataFrame, source: str) -> int:
     if df.empty:
         return 0
     dates = df["as_of_date"].dropna().unique().tolist()
-    conn.execute(delete(FactOperatorLiability).where(FactOperatorLiability.as_of_date.in_(dates), FactOperatorLiability.source == source))
+    _delete_in_values_chunks(conn, FactOperatorLiability, FactOperatorLiability.as_of_date, dates, (FactOperatorLiability.source == source,))
     payload = df.to_dict(orient="records")
-    conn.execute(insert(FactOperatorLiability), payload)
-    return len(payload)
+    return _execute_insert_in_chunks(conn, FactOperatorLiability, payload, FactOperatorLiability.__tablename__)
 
 
 def replace_fact_well_status(conn: Connection, df: pd.DataFrame, source: str) -> int:
@@ -143,24 +206,19 @@ def replace_fact_well_status(conn: Connection, df: pd.DataFrame, source: str) ->
         return 0
     conn.execute(delete(FactWellStatus).where(FactWellStatus.source == source))
     payload = df.to_dict(orient="records")
-    conn.execute(insert(FactWellStatus), payload)
-    return len(payload)
+    return _execute_insert_in_chunks(conn, FactWellStatus, payload, FactWellStatus.__tablename__)
 
 
 def replace_fact_metrics(conn: Connection, df: pd.DataFrame, as_of_date: date) -> int:
     conn.execute(delete(FactOperatorMetrics).where(FactOperatorMetrics.as_of_date == as_of_date))
     payload = df.to_dict(orient="records")
-    if payload:
-        conn.execute(insert(FactOperatorMetrics), payload)
-    return len(payload)
+    return _execute_insert_in_chunks(conn, FactOperatorMetrics, payload, FactOperatorMetrics.__tablename__)
 
 
 def replace_fact_restart(conn: Connection, df: pd.DataFrame, as_of_date: date) -> int:
     conn.execute(delete(FactWellRestartScore).where(FactWellRestartScore.as_of_date == as_of_date))
     payload = df.to_dict(orient="records")
-    if payload:
-        conn.execute(insert(FactWellRestartScore), payload)
-    return len(payload)
+    return _execute_insert_in_chunks(conn, FactWellRestartScore, payload, FactWellRestartScore.__tablename__)
 
 
 def record_ingestion_run(
