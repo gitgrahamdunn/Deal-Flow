@@ -7,7 +7,7 @@ from itertools import islice
 from uuid import uuid4
 
 import pandas as pd
-from sqlalchemy import delete, insert, select, tuple_
+from sqlalchemy import bindparam, delete, insert, select, tuple_, update
 from sqlalchemy.engine import Connection
 
 from deal_flow_ingest.db.schema import (
@@ -96,8 +96,49 @@ def _delete_tuple_in_chunks(conn: Connection, model, columns: tuple, key_tuples:
         conn.execute(delete(model).where(tuple_(*columns).in_(chunk)))
 
 
-def _json_payload(value):
-    return json.dumps(value)
+def _json_payload(conn: Connection, value):
+    return _json_serialize_if_needed(conn, value)
+
+
+def _json_serialize_if_needed(conn: Connection, value):
+    if _dialect_name(conn) == "sqlite" and value is not None and isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return value
+
+
+def json_compat_frame(conn: Connection, df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    for column in columns:
+        if column in out.columns:
+            out[column] = out[column].map(lambda value: _json_serialize_if_needed(conn, value))
+    return out
+
+
+def _execute_update_in_chunks(conn: Connection, model, key_column: str, payload: list[dict], label: str) -> int:
+    if not payload:
+        return 0
+    chunk_size = _insert_chunk_size(conn)
+    table = model.__table__
+    non_key_columns = [c.name for c in table.columns if c.name != key_column and c.name not in {"created_at", "updated_at"}]
+    stmt = (
+        update(table)
+        .where(getattr(table.c, key_column) == bindparam(f"pk_{key_column}"))
+        .values({col: bindparam(col) for col in non_key_columns})
+    )
+    updates = []
+    for row in payload:
+        update_row = {f"pk_{key_column}": row[key_column]}
+        update_row.update({col: row.get(col) for col in non_key_columns})
+        updates.append(update_row)
+
+    total_chunks = (len(updates) + chunk_size - 1) // chunk_size
+    for idx, rows in enumerate(chunked(updates, chunk_size), start=1):
+        conn.execute(stmt, rows)
+        if idx == 1 or idx == total_chunks or idx % 25 == 0:
+            logger.info("Updated chunk %s/%s in %s", idx, total_chunks, label)
+    return len(updates)
 
 
 def _dedupe_wells_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -202,15 +243,7 @@ def upsert_dim_business_associate(conn: Connection, df: pd.DataFrame, source: st
     if inserts:
         _execute_insert_in_chunks(conn, DimBusinessAssociate, inserts, "dim_business_associate")
 
-    for row in updates:
-        conn.execute(
-            DimBusinessAssociate.__table__.update().where(DimBusinessAssociate.ba_id == row["ba_id"]).values(
-                ba_name_raw=row.get("ba_name_raw"),
-                ba_name_norm=row.get("ba_name_norm"),
-                entity_type=row.get("entity_type"),
-                source_last_seen=source,
-            )
-        )
+    _execute_update_in_chunks(conn, DimBusinessAssociate, "ba_id", updates, "dim_business_associate")
 
     return {ba_id: ba_id for ba_id in working["ba_id"].tolist()}
 
@@ -258,10 +291,7 @@ def upsert_dim_well(conn: Connection, wells_df: pd.DataFrame) -> int:
     updates = deduped_wells_df[deduped_wells_df["well_id"].isin(existing)].to_dict(orient="records")
     if inserts:
         _execute_insert_in_chunks(conn, DimWell, inserts, "dim_well")
-    for row in updates:
-        conn.execute(
-            DimWell.__table__.update().where(DimWell.well_id == row["well_id"]).values(**{k: v for k, v in row.items() if k != "well_id"})
-        )
+    _execute_update_in_chunks(conn, DimWell, "well_id", updates, "dim_well")
     return len(inserts) + len(updates)
 
 
@@ -274,12 +304,7 @@ def upsert_dim_facility(conn: Connection, fac_df: pd.DataFrame) -> int:
     updates = fac_df[fac_df["facility_id"].isin(existing)].to_dict(orient="records")
     if inserts:
         _execute_insert_in_chunks(conn, DimFacility, inserts, "dim_facility")
-    for row in updates:
-        conn.execute(
-            DimFacility.__table__.update().where(DimFacility.facility_id == row["facility_id"]).values(
-                **{k: v for k, v in row.items() if k != "facility_id"}
-            )
-        )
+    _execute_update_in_chunks(conn, DimFacility, "facility_id", updates, "dim_facility")
     return len(inserts) + len(updates)
 
 
@@ -362,9 +387,9 @@ def record_ingestion_run(
             started_at=started_at,
             finished_at=finished_at,
             status=status,
-            sources_ok=_json_payload(sources_ok),
-            sources_failed=_json_payload(sources_failed),
-            row_counts_json=_json_payload(row_counts),
+            sources_ok=_json_payload(conn, sources_ok),
+            sources_failed=_json_payload(conn, sources_failed),
+            row_counts_json=_json_payload(conn, row_counts),
             notes=notes,
         )
     )

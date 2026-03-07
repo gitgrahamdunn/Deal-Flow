@@ -10,7 +10,7 @@ def test_reset_database_sqlite(tmp_path: Path, monkeypatch):
     db_path.write_text("stale")
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
 
-    args = Namespace(force=False)
+    args = Namespace(force=False, include_cache=False)
     assert reset_database(args) == 0
 
     assert db_path.exists()
@@ -25,8 +25,8 @@ def test_reset_database_non_sqlite_requires_force(monkeypatch):
     def _fake_upgrade() -> None:
         called["migrate"] = True
 
-    monkeypatch.setattr("deal_flow_ingest.deal_flow_ingest.cli.upgrade_to_head", _fake_upgrade)
+    monkeypatch.setattr("deal_flow_ingest.deal_flow_ingest.services.pipeline.upgrade_to_head", _fake_upgrade)
 
-    args = Namespace(force=False)
+    args = Namespace(force=False, include_cache=False)
     assert reset_database(args) == 1
     assert called["migrate"] is False

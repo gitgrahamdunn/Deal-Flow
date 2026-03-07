@@ -73,3 +73,15 @@ def test_parse_business_associate() -> None:
     assert list(parsed.columns) == ["ba_id", "ba_name_raw", "entity_type"]
     assert parsed["ba_id"].tolist() == ["", ""]
     assert parsed["ba_name_raw"].tolist() == ["Operator One", "Operator Two"]
+
+
+
+def test_discover_petrinex_artifact_urls_excludes_pdf_only_links() -> None:
+    html = """
+    <a href="/files/Petrinex_Facility_Master_2024.pdf">Facility Master PDF</a>
+    <a href="/files/Petrinex_Facility_Master_2024.csv">Facility Master CSV</a>
+    """
+
+    discovered = _discover_petrinex_artifact_urls(html, "https://www.petrinex.ca/PD/Pages/APD.aspx")
+
+    assert discovered["facility_master"].endswith(".csv")

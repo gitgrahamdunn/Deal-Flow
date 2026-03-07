@@ -31,7 +31,7 @@ def test_pipeline_live_mode_all_sources_empty_succeeds(tmp_path: Path, monkeypat
     def _empty_dataset(*_args, **_kwargs):
         return pd.DataFrame()
 
-    monkeypatch.setattr("deal_flow_ingest.deal_flow_ingest.cli.load_dataset", _empty_dataset)
+    monkeypatch.setattr("deal_flow_ingest.deal_flow_ingest.services.pipeline.load_dataset", _empty_dataset)
 
     args = Namespace(
         start=None,

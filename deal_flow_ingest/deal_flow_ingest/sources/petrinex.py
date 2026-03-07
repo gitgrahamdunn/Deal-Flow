@@ -26,17 +26,20 @@ def load_public_data(downloader: Downloader, source: SourcePayload, refresh: boo
     discovery_key = _DATA_KIND_TO_DISCOVERY_KEY.get(source.data_kind)
 
     if not artifact_url and source.landing_page_url and discovery_key:
-        try:
-            landing_page = downloader.fetch(source.key, source.landing_page_url, refresh=refresh, file_type="html")
-            html = landing_page.path.read_text(encoding="utf-8", errors="replace")
-            discovered_urls = _discover_petrinex_artifact_urls(html, source.landing_page_url)
-            LOGGER.info("Discovered Petrinex artifact URLs: %s", discovered_urls)
-            artifact_url = discovered_urls.get(discovery_key, "")
-            if not artifact_url:
-                LOGGER.warning("No Petrinex artifact discovered for %s on %s", discovery_key, source.landing_page_url)
-                return pd.DataFrame()
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed Petrinex artifact discovery for %s: %s", source.key, exc)
+        landing_pages = [source.landing_page_url, *(source.alternate_landing_page_urls or [])]
+        for landing_url in [u for u in landing_pages if u]:
+            try:
+                landing_page = downloader.fetch(source.key, landing_url, refresh=refresh, file_type="html")
+                html = landing_page.path.read_text(encoding="utf-8", errors="replace")
+                discovered_urls = _discover_petrinex_artifact_urls(html, landing_url)
+                LOGGER.info("Discovered Petrinex artifact URLs from %s: %s", landing_url, discovered_urls)
+                artifact_url = discovered_urls.get(discovery_key, "")
+                if artifact_url:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Failed Petrinex artifact discovery for %s on %s: %s", source.key, landing_url, exc)
+        if not artifact_url:
+            LOGGER.warning("No Petrinex artifact discovered for %s from configured landing pages", discovery_key)
             return pd.DataFrame()
 
     if not artifact_url:
@@ -119,11 +122,18 @@ def _discover_petrinex_artifact_urls(html: str, base_url: str = "https://www.pet
 
         absolute_url = urljoin(base_url, raw_href)
         searchable = f"{text} {raw_href} {absolute_url}".lower().replace("_", " ")
+        if ".pdf" in searchable:
+            LOGGER.debug("Skipping non-tabular Petrinex artifact candidate: %s", absolute_url)
+            continue
         extension_score = 0
         if ".csv" in searchable:
-            extension_score = 3
+            extension_score = 4
         elif ".xlsx" in searchable or ".xls" in searchable:
-            extension_score = 2
+            extension_score = 3
+        elif ".zip" in searchable:
+            extension_score = 1
+        else:
+            continue
 
         for key, required_tokens in wanted.items():
             if all(token in searchable for token in required_tokens):
