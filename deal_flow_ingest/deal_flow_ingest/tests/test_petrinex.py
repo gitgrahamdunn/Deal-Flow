@@ -70,5 +70,6 @@ def test_parse_business_associate() -> None:
 
     parsed = load_business_associate(source)
 
-    assert list(parsed.columns) == ["name_raw"]
-    assert parsed["name_raw"].tolist() == ["Operator One", "Operator Two"]
+    assert list(parsed.columns) == ["ba_id", "ba_name_raw", "entity_type"]
+    assert parsed["ba_id"].tolist() == ["", ""]
+    assert parsed["ba_name_raw"].tolist() == ["Operator One", "Operator Two"]

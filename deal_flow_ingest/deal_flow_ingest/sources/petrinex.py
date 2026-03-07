@@ -182,12 +182,26 @@ def _column_as_series(df: pd.DataFrame, columns: dict[str, str], aliases: tuple[
 def load_business_associate(df: pd.DataFrame) -> pd.DataFrame:
     cols = {c.lower().strip(): c for c in df.columns}
     out = pd.DataFrame(index=df.index)
-    out["name_raw"] = _column_as_series(
+    out["ba_id"] = _column_as_series(
+        df,
+        cols,
+        (
+            "business_associate_id",
+            "business associate id",
+            "ba_id",
+            "ba id",
+            "operator_ba_id",
+            "operator ba id",
+        ),
+        "",
+    )
+    out["ba_name_raw"] = _column_as_series(
         df,
         cols,
         ("business_associate_name", "business associate name", "operator", "company_name", "company name"),
         "",
     )
+    out["entity_type"] = _column_as_series(df, cols, ("entity_type", "entity type", "associate_type", "associate type"), None)
     return out
 
 
