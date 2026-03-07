@@ -11,7 +11,9 @@ from sqlalchemy import delete, insert, select, tuple_
 from sqlalchemy.engine import Connection
 
 from deal_flow_ingest.db.schema import (
+    BridgeOperatorBusinessAssociate,
     BridgeWellFacility,
+    DimBusinessAssociate,
     DimFacility,
     DimOperator,
     DimWell,
@@ -159,6 +161,87 @@ def upsert_dim_operator(conn: Connection, df: pd.DataFrame, entity_type: str = "
     mapping = {r.name_norm: r.operator_id for r in conn.execute(select(DimOperator.name_norm, DimOperator.operator_id))}
     return mapping
 
+
+
+
+def upsert_dim_business_associate(conn: Connection, df: pd.DataFrame, source: str) -> dict[str, str]:
+    if df.empty:
+        return {}
+
+    working = pd.DataFrame()
+    working["ba_id"] = df.get("ba_id", "").fillna("").astype(str).str.strip()
+    working["ba_name_raw"] = df.get("ba_name_raw", "").replace({pd.NA: None})
+    working["entity_type"] = df.get("entity_type", pd.Series([None] * len(df), index=df.index))
+    working["ba_name_norm"] = (
+        working["ba_name_raw"].fillna("").astype(str).map(normalize_operator_name).replace({"": None})
+    )
+    working = working[working["ba_id"] != ""].drop_duplicates(subset=["ba_id"], keep="last")
+
+    if working.empty:
+        return {}
+
+    ba_ids = working["ba_id"].tolist()
+    existing = _fetch_existing_values_in_chunks(conn, DimBusinessAssociate.ba_id, ba_ids)
+
+    inserts: list[dict] = []
+    updates: list[dict] = []
+    for row in working.to_dict(orient="records"):
+        payload = {
+            "ba_id": row["ba_id"],
+            "ba_name_raw": row.get("ba_name_raw"),
+            "ba_name_norm": row.get("ba_name_norm"),
+            "entity_type": row.get("entity_type"),
+            "source_last_seen": source,
+        }
+        if row["ba_id"] in existing:
+            updates.append(payload)
+        else:
+            payload["source_first_seen"] = source
+            inserts.append(payload)
+
+    if inserts:
+        _execute_insert_in_chunks(conn, DimBusinessAssociate, inserts, "dim_business_associate")
+
+    for row in updates:
+        conn.execute(
+            DimBusinessAssociate.__table__.update().where(DimBusinessAssociate.ba_id == row["ba_id"]).values(
+                ba_name_raw=row.get("ba_name_raw"),
+                ba_name_norm=row.get("ba_name_norm"),
+                entity_type=row.get("entity_type"),
+                source_last_seen=source,
+            )
+        )
+
+    return {ba_id: ba_id for ba_id in working["ba_id"].tolist()}
+
+
+def upsert_bridge_operator_business_associate(conn: Connection, df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+
+    expected_cols = ["operator_id", "ba_id", "match_method", "confidence"]
+    working = df.reindex(columns=expected_cols).copy()
+    working["operator_id"] = pd.to_numeric(working["operator_id"], errors="coerce")
+    working["ba_id"] = working["ba_id"].fillna("").astype(str).str.strip()
+    working["confidence"] = pd.to_numeric(working["confidence"], errors="coerce")
+    working = working[working["operator_id"].notna() & (working["ba_id"] != "")]
+    if working.empty:
+        return 0
+
+    working["operator_id"] = working["operator_id"].astype(int)
+    working = working.drop_duplicates(subset=["operator_id", "ba_id"], keep="last")
+
+    keys_df = working[["operator_id", "ba_id"]].drop_duplicates()
+    key_tuples = [tuple(x) for x in keys_df.to_records(index=False)]
+    _delete_tuple_in_chunks(
+        conn,
+        BridgeOperatorBusinessAssociate,
+        (BridgeOperatorBusinessAssociate.operator_id, BridgeOperatorBusinessAssociate.ba_id),
+        key_tuples,
+    )
+
+    payload = working.to_dict(orient="records")
+    return _execute_insert_in_chunks(conn, BridgeOperatorBusinessAssociate, payload, "bridge_operator_business_associate")
 
 def upsert_dim_well(conn: Connection, wells_df: pd.DataFrame) -> int:
     if wells_df.empty:

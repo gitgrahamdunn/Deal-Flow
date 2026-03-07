@@ -20,6 +20,7 @@ from deal_flow_ingest.db.load import (
     replace_fact_restart,
     replace_fact_well_status,
     upsert_dim_facility,
+    upsert_dim_business_associate,
     upsert_dim_operator,
     upsert_dim_well,
     load_bridge_well_facility,
@@ -241,6 +242,7 @@ def run_ingestion(args: argparse.Namespace) -> int:
                 [
                     datasets.get("wells", pd.DataFrame()).get("licensee", pd.Series(dtype=str)).rename("name_raw"),
                     datasets.get("facility_master", pd.DataFrame()).get("facility_operator", pd.Series(dtype=str)).rename("name_raw"),
+                    datasets.get("operators", pd.DataFrame()).get("ba_name_raw", pd.Series(dtype=str)).rename("name_raw"),
                     datasets.get("operators", pd.DataFrame()).get("name_raw", pd.Series(dtype=str)).rename("name_raw"),
                     datasets.get("liability", pd.DataFrame()).get("operator", pd.Series(dtype=str)).rename("name_raw"),
                 ],
@@ -251,6 +253,18 @@ def run_ingestion(args: argparse.Namespace) -> int:
                 pd.DataFrame({"name_raw": operators_raw.fillna("").astype(str)}),
                 source="multi_source",
             )
+
+            ba_raw = datasets.get("operators", pd.DataFrame())
+            if not ba_raw.empty and "ba_id" in ba_raw.columns:
+                row_counts["loaded"]["dim_business_associate"] = len(
+                    upsert_dim_business_associate(
+                        conn,
+                        ba_raw[[c for c in ["ba_id", "ba_name_raw", "entity_type"] if c in ba_raw.columns]],
+                        source="petrinex_business_associate",
+                    )
+                )
+            else:
+                row_counts["loaded"]["dim_business_associate"] = 0
 
             wells_df = _prep_wells(datasets.get("wells", pd.DataFrame()), operator_map, "aer_st37", end)
             original_wells_count = len(wells_df)

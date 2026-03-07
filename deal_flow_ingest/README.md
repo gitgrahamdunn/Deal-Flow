@@ -45,8 +45,10 @@ Implemented tables:
 
 - `dim_operator`
 - `dim_well`
+- `dim_business_associate`
 - `dim_facility`
 - `bridge_well_facility`
+- `bridge_operator_business_associate`
 - `fact_facility_production_monthly`
 - `fact_well_production_monthly`
 - `fact_operator_production_monthly`
@@ -56,6 +58,9 @@ Implemented tables:
 - `fact_well_status`
 - `fact_well_restart_score`
 - `ingestion_run`
+
+
+`dim_business_associate` stores Petrinex BA identifiers and names separately from `dim_operator`, and `bridge_operator_business_associate` provides a lightweight mapping layer between the two. This is a schema-first preparation step for future Petrinex BA-based ingestion and later WI/non-op/royalty ownership mapping.
 
 ## Dry-run samples
 

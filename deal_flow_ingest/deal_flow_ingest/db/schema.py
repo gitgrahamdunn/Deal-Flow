@@ -42,6 +42,28 @@ class DimOperator(TimestampMixin, Base):
     source_last_seen: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class DimBusinessAssociate(TimestampMixin, Base):
+    __tablename__ = "dim_business_associate"
+
+    ba_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    ba_name_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ba_name_norm: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    entity_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_first_seen: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_last_seen: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BridgeOperatorBusinessAssociate(TimestampMixin, Base):
+    __tablename__ = "bridge_operator_business_associate"
+    __table_args__ = (UniqueConstraint("operator_id", "ba_id", name="uq_bridge_operator_business_associate"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    operator_id: Mapped[int] = mapped_column(ForeignKey("dim_operator.operator_id"), nullable=False)
+    ba_id: Mapped[str] = mapped_column(ForeignKey("dim_business_associate.ba_id"), nullable=False)
+    match_method: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class DimWell(TimestampMixin, Base):
     __tablename__ = "dim_well"
 
