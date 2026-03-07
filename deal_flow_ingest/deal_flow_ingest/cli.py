@@ -5,9 +5,11 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import unquote
 
 import pandas as pd
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 
 from deal_flow_ingest.config import get_database_url, iter_enabled_sources, load_config
 from deal_flow_ingest.db.load import (
@@ -93,6 +95,8 @@ def parse_args() -> argparse.Namespace:
     export.add_argument("--min-score", type=float, default=30.0)
     export.add_argument("--limit", type=int, default=250)
     export.add_argument("--output", type=str, default="data/exports/well_opportunities.csv")
+    reset = sub.add_parser("reset")
+    reset.add_argument("--force", action="store_true")
     return parser.parse_args()
 
 
@@ -109,6 +113,40 @@ def _ensure_database_dir() -> None:
         if not db_path.is_absolute():
             db_path = Path.cwd() / db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _sqlite_db_path(db_url: str) -> Path | None:
+    parsed = make_url(db_url)
+    if parsed.get_backend_name() != "sqlite":
+        return None
+    if not parsed.database or parsed.database == ":memory:":
+        return None
+    db_path = Path(unquote(parsed.database))
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+    return db_path
+
+
+def reset_database(args: argparse.Namespace) -> int:
+    database_url = get_database_url()
+    sqlite_path = _sqlite_db_path(database_url)
+
+    if sqlite_path:
+        sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        if sqlite_path.exists():
+            sqlite_path.unlink()
+        LOGGER.info("Deleted SQLite database: %s", sqlite_path)
+    elif not args.force:
+        warning = "Refusing to drop non-SQLite database without --force"
+        LOGGER.warning(warning)
+        print(warning)
+        return 1
+
+    upgrade_to_head()
+    LOGGER.info("Database reset complete")
+    print("Database reset complete")
+    return 0
+
 
 def _parse_date(s: str | None, default: date) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date() if s else default
@@ -528,3 +566,5 @@ def main() -> None:
         raise SystemExit(run_ingestion(args))
     if args.command == "export-opportunities":
         raise SystemExit(export_opportunities(args))
+    if args.command == "reset":
+        raise SystemExit(reset_database(args))

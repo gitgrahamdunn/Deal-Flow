@@ -25,6 +25,14 @@ Optional flags:
 - `--refresh`
 - `--config deal_flow_ingest/deal_flow_ingest/configs/sources.yaml`
 
+## Reset development database
+
+```bash
+python -m deal_flow_ingest reset
+```
+
+This deletes the local SQLite database and recreates it using migrations.
+
 ## Environment
 
 - `DATABASE_URL` optional.
