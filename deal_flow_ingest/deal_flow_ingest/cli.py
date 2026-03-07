@@ -134,6 +134,41 @@ def _prep_wells(df: pd.DataFrame, op_map: dict[str, int], source: str, as_of: da
     return out
 
 
+def _dedupe_wells_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "well_id" not in df.columns:
+        return df
+
+    working = df.copy()
+    working["_row_order"] = range(len(working))
+
+    status_non_empty = (
+        working["status"].fillna("").astype(str).str.strip().ne("") if "status" in working.columns else pd.Series(False, index=working.index)
+    )
+    licensee_present = (
+        working["licensee_operator_id"].notna() if "licensee_operator_id" in working.columns else pd.Series(False, index=working.index)
+    )
+
+    score = status_non_empty.astype(int) + licensee_present.astype(int)
+    for column in ["lsd", "section", "township", "range", "meridian"]:
+        score += (working[column].notna().astype(int) if column in working.columns else 0)
+
+    has_lat_lon = (
+        working[[c for c in ["lat", "lon"] if c in working.columns]].notna().any(axis=1).astype(int)
+        if any(c in working.columns for c in ["lat", "lon"])
+        else 0
+    )
+    score += has_lat_lon
+
+    working["_completeness_score"] = score
+
+    return (
+        working.sort_values(["_completeness_score", "_row_order"], ascending=[False, True])
+        .drop_duplicates(subset=["well_id"], keep="first")
+        .sort_values("_row_order")
+        .drop(columns=["_completeness_score", "_row_order"])
+    )
+
+
 def _estimate_well_production(fac_prod: pd.DataFrame, bridge: pd.DataFrame) -> pd.DataFrame:
     if fac_prod.empty or bridge.empty:
         return _empty_df(["month", "well_id", "oil_bbl", "gas_mcf", "water_bbl", "source", "is_estimated"])
@@ -218,6 +253,26 @@ def run_ingestion(args: argparse.Namespace) -> int:
             )
 
             wells_df = _prep_wells(datasets.get("wells", pd.DataFrame()), operator_map, "aer_st37", end)
+            original_wells_count = len(wells_df)
+            duplicate_counts = pd.Series(dtype=int)
+            if not wells_df.empty and "well_id" in wells_df.columns:
+                duplicate_counts = wells_df["well_id"].value_counts()
+                duplicate_counts = duplicate_counts[duplicate_counts > 1]
+                if not duplicate_counts.empty:
+                    top_duplicates = duplicate_counts.head(20)
+                    LOGGER.info("Top duplicate ST37 well_id counts (up to 20):")
+                    for well_id, count in top_duplicates.items():
+                        LOGGER.info("  %s: %s", well_id, count)
+
+            wells_df = _dedupe_wells_df(wells_df)
+            deduped_wells_count = len(wells_df)
+            duplicate_removed_count = original_wells_count - deduped_wells_count
+            LOGGER.info(
+                "ST37 wells rows before dedupe=%s after dedupe=%s duplicates_removed=%s",
+                original_wells_count,
+                deduped_wells_count,
+                duplicate_removed_count,
+            )
             row_counts["loaded"]["dim_well"] = upsert_dim_well(conn, wells_df)
 
             fac_raw = datasets.get("facility_master", pd.DataFrame())

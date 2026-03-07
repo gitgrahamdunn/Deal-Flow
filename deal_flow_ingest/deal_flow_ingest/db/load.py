@@ -98,6 +98,41 @@ def _json_payload(value):
     return json.dumps(value)
 
 
+def _dedupe_wells_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "well_id" not in df.columns:
+        return df
+
+    working = df.copy()
+    working["_row_order"] = range(len(working))
+
+    status_non_empty = (
+        working["status"].fillna("").astype(str).str.strip().ne("") if "status" in working.columns else pd.Series(False, index=working.index)
+    )
+    licensee_present = (
+        working["licensee_operator_id"].notna() if "licensee_operator_id" in working.columns else pd.Series(False, index=working.index)
+    )
+
+    score = status_non_empty.astype(int) + licensee_present.astype(int)
+    for column in ["lsd", "section", "township", "range", "meridian"]:
+        score += (working[column].notna().astype(int) if column in working.columns else 0)
+
+    has_lat_lon = (
+        working[[c for c in ["lat", "lon"] if c in working.columns]].notna().any(axis=1).astype(int)
+        if any(c in working.columns for c in ["lat", "lon"])
+        else 0
+    )
+    score += has_lat_lon
+
+    working["_completeness_score"] = score
+    deduped = (
+        working.sort_values(["_completeness_score", "_row_order"], ascending=[False, True])
+        .drop_duplicates(subset=["well_id"], keep="first")
+        .sort_values("_row_order")
+        .drop(columns=["_completeness_score", "_row_order"])
+    )
+    return deduped
+
+
 def upsert_dim_operator(conn: Connection, df: pd.DataFrame, entity_type: str = "operator", source: str | None = None) -> dict[str, int]:
     if df.empty:
         return {}
@@ -128,10 +163,16 @@ def upsert_dim_operator(conn: Connection, df: pd.DataFrame, entity_type: str = "
 def upsert_dim_well(conn: Connection, wells_df: pd.DataFrame) -> int:
     if wells_df.empty:
         return 0
-    keys = wells_df["well_id"].dropna().astype(str).unique().tolist()
+
+    deduped_wells_df = _dedupe_wells_df(wells_df)
+    duplicates_collapsed = len(wells_df) - len(deduped_wells_df)
+    if duplicates_collapsed > 0:
+        logger.info("Collapsed %s duplicate dim_well rows by well_id before upsert", duplicates_collapsed)
+
+    keys = deduped_wells_df["well_id"].dropna().astype(str).unique().tolist()
     existing = _fetch_existing_values_in_chunks(conn, DimWell.well_id, keys)
-    inserts = wells_df[~wells_df["well_id"].isin(existing)].to_dict(orient="records")
-    updates = wells_df[wells_df["well_id"].isin(existing)].to_dict(orient="records")
+    inserts = deduped_wells_df[~deduped_wells_df["well_id"].isin(existing)].to_dict(orient="records")
+    updates = deduped_wells_df[deduped_wells_df["well_id"].isin(existing)].to_dict(orient="records")
     if inserts:
         _execute_insert_in_chunks(conn, DimWell, inserts, "dim_well")
     for row in updates:

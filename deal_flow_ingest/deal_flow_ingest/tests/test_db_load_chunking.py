@@ -37,3 +37,41 @@ def test_upsert_dim_well_large_sqlite_batch_succeeds():
 
         total = conn.execute(select(func.count()).select_from(DimWell)).scalar_one()
         assert total == row_count
+
+
+def test_upsert_dim_well_dedupes_by_completeness_score():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    wells_df = pd.DataFrame(
+        {
+            "well_id": ["100011100100W500", "100011100100W500", "200022200200W600"],
+            "uwi_raw": ["00/11-11-001-01W5/0", "00/11-11-001-01W5/0", "00/22-22-002-02W6/0"],
+            "licensee_operator_id": [None, 123, None],
+            "status": ["", "ACTIVE", "SUSPENDED"],
+            "lsd": [None, "11", None],
+            "section": [None, 11, None],
+            "township": [None, 1, None],
+            "range": [None, 1, None],
+            "meridian": [None, 5, None],
+            "lat": [None, 51.0, None],
+            "lon": [None, -114.0, None],
+            "first_seen": [None, None, None],
+            "last_seen": [None, None, None],
+            "source": ["test", "test", "test"],
+        }
+    )
+
+    with engine.begin() as conn:
+        affected = upsert_dim_well(conn, wells_df)
+        assert affected == 2
+
+        rows = conn.execute(select(DimWell)).all()
+        assert len(rows) == 2
+
+        row_by_well_id = {row.well_id: row for row in rows}
+        retained = row_by_well_id["100011100100W500"]
+        assert retained.status == "ACTIVE"
+        assert retained.licensee_operator_id == 123
+        assert retained.section == 11
+        assert retained.lat == 51.0
