@@ -246,14 +246,113 @@ def _parse_well_table(path: Path) -> pd.DataFrame:
     if frame.empty:
         return frame
 
-    cols = {c.lower().strip(): c for c in frame.columns}
+    columns = [str(c) for c in frame.columns]
+    uwi_column = _find_first_matching_column(columns, ["uwi", "well_id", "wellid", "well identifier"])
+    status_column = _find_first_matching_column(columns, ["status", "well_status", "well status"])
+    licensee_column = _find_best_licensee_column(columns)
+
+    scored_candidates = _score_licensee_candidates(columns)
+    LOGGER.info("ST37 detected licensee column: %s", licensee_column or "<none>")
+    LOGGER.debug(
+        "ST37 top licensee column candidates: %s",
+        [f"{name}={score}" for name, score in scored_candidates[:5]],
+    )
+    if not licensee_column:
+        LOGGER.warning("ST37 parser did not detect a licensee/operator column; defaulting to empty licensee values")
+
     out = pd.DataFrame()
-    out["uwi"] = frame.get(cols.get("uwi"), frame.get(cols.get("well_id"), ""))
-    out["status"] = frame.get(cols.get("status"), frame.get(cols.get("well_status"), "UNKNOWN"))
-    out["licensee"] = frame.get(cols.get("licensee"), frame.get(cols.get("operator"), ""))
+    out["uwi"] = frame.get(uwi_column, "")
+    out["status"] = frame.get(status_column, "UNKNOWN")
+    out["licensee"] = frame.get(licensee_column, "")
+
+    non_empty_licensee = out["licensee"].fillna("").astype(str).str.strip()
+    non_empty_count = int((non_empty_licensee != "").sum())
+    distinct_count = int(non_empty_licensee[non_empty_licensee != ""].nunique())
+    LOGGER.info(
+        "ST37 parsed licensee values: non_empty=%s distinct_pre_normalization=%s",
+        non_empty_count,
+        distinct_count,
+    )
+
     for field in ["township", "range", "section", "meridian", "lat", "lon", "lsd"]:
-        out[field] = frame.get(cols.get(field), None)
+        out[field] = frame.get(_find_first_matching_column(columns, [field]), None)
     return out.dropna(subset=["uwi"], how="all")
+
+
+def _normalize_column_name(name: str) -> str:
+    normalized = re.sub(r"[\s\-/\\.,;:()\[\]{}]+", "_", str(name).strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
+def _find_first_matching_column(columns: list[str], candidates: list[str]) -> str | None:
+    normalized_lookup = {_normalize_column_name(column): column for column in columns}
+    for candidate in candidates:
+        normalized_candidate = _normalize_column_name(candidate)
+        column = normalized_lookup.get(normalized_candidate)
+        if column is not None:
+            return column
+    return None
+
+
+def _score_licensee_candidates(columns: list[str]) -> list[tuple[str, int]]:
+    scored: list[tuple[str, int]] = []
+    for column in columns:
+        normalized = _normalize_column_name(column)
+        tokens = set(normalized.split("_")) if normalized else set()
+
+        score = 0
+        has_operator_meaning = False
+
+        if "licensee" in tokens or "licensee" in normalized:
+            score += 70
+            has_operator_meaning = True
+        if "operator" in tokens or "operator" in normalized:
+            score += 65
+            has_operator_meaning = True
+        if "business_associate" in normalized:
+            score += 55
+            has_operator_meaning = True
+        if "ba" in tokens:
+            score += 40
+            has_operator_meaning = True
+        if "company" in tokens:
+            score += 45
+            has_operator_meaning = True
+
+        has_name = "name" in tokens
+        has_id = "id" in tokens
+        has_code = "code" in tokens
+
+        if has_name:
+            score += 35
+        if has_operator_meaning and has_name:
+            score += 25
+
+        if has_operator_meaning and has_id and not has_name:
+            score -= 50
+        if has_operator_meaning and has_code and not has_name:
+            score -= 35
+
+        if any(token in tokens for token in {"status", "uwi", "well", "field", "pool", "date", "latitude", "longitude"}):
+            score -= 45
+
+        if not has_operator_meaning:
+            score -= 30
+
+        scored.append((column, score))
+
+    return sorted(scored, key=lambda item: (-item[1], _normalize_column_name(item[0]), item[0]))
+
+
+def _find_best_licensee_column(columns: list[str]) -> str | None:
+    scored = _score_licensee_candidates(columns)
+    if not scored:
+        return None
+    best_column, best_score = scored[0]
+    if best_score <= 0:
+        return None
+    return best_column
 
 
 def _resolve_st37_artifact(path: Path, extracted_dir: Path | None) -> Path | None:
