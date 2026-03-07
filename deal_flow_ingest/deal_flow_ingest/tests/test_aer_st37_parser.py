@@ -2,7 +2,13 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from deal_flow_ingest.config import SourcePayload
-from deal_flow_ingest.sources.aer import _discover_st37_artifact_url, _parse_st37_text, load_st37
+from deal_flow_ingest.sources.aer import (
+    _discover_st37_artifact_url,
+    _find_best_licensee_column,
+    _parse_st37_text,
+    _parse_well_table,
+    load_st37,
+)
 
 
 def test_parse_st37_text_delimited_sample_extracts_minimum_fields():
@@ -275,3 +281,37 @@ def test_load_st37_persists_discovered_artifact_url(tmp_path: Path):
 
     assert len(parsed) == 1
     assert downloader.meta["discovered_artifact_url"] == "https://www.aer.ca/files/ST37-Text.zip"
+
+
+def test_find_best_licensee_column_prefers_licensee_name_variants():
+    columns = ["UWI", "STATUS", "LICENSEE_NAME", "LICENSEE_ID", "WELL_NAME"]
+    assert _find_best_licensee_column(columns) == "LICENSEE_NAME"
+
+
+def test_find_best_licensee_column_supports_business_associate_labels():
+    columns = ["UWI", "Business Associate Name", "BA_ID", "Pool"]
+    assert _find_best_licensee_column(columns) == "Business Associate Name"
+
+
+def test_find_best_licensee_column_prefers_operator_name_over_codes():
+    columns = ["Operator Code", "Operator Name", "Field Code", "UWI"]
+    assert _find_best_licensee_column(columns) == "Operator Name"
+
+
+def test_find_best_licensee_column_recognizes_ba_name():
+    columns = ["BA_NAME", "BA_ID", "Status", "UWI"]
+    assert _find_best_licensee_column(columns) == "BA_NAME"
+
+
+def test_parse_well_table_uses_detected_licensee_column(tmp_path: Path):
+    sample = tmp_path / "st37_licensee_name.csv"
+    sample.write_text(
+        "UWI,STATUS,LICENSEE_NAME\n"
+        "00/12-34-056-07W4,ACTIVE,ALPHA ENERGY\n"
+        "00/11-33-055-06W4,SUSPENDED,BETA RESOURCES\n",
+        encoding="utf-8",
+    )
+
+    parsed = _parse_well_table(sample)
+
+    assert list(parsed["licensee"]) == ["ALPHA ENERGY", "BETA RESOURCES"]
