@@ -27,7 +27,7 @@ sources:
     source_name: petrinex_business_associate
     local_sample: operators_sample.csv
     parser_name: petrinex_public
-    landing_page_url: "https://www.petrinex.ca/public-data"
+    landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
     dataset_url: ""
     file_type: csv
     refresh_frequency: monthly
@@ -37,7 +37,7 @@ sources:
     source_name: petrinex_facility
     local_sample: facility_master_sample.csv
     parser_name: petrinex_public
-    landing_page_url: "https://www.petrinex.ca/public-data"
+    landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
     dataset_url: ""
     file_type: csv
     refresh_frequency: monthly
@@ -47,7 +47,7 @@ sources:
     source_name: petrinex_bridge
     local_sample: well_facility_bridge_sample.csv
     parser_name: petrinex_public
-    landing_page_url: "https://www.petrinex.ca/public-data"
+    landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
     dataset_url: ""
     file_type: csv
     refresh_frequency: monthly
@@ -57,7 +57,7 @@ sources:
     source_name: petrinex_production
     local_sample: facility_production_sample.csv
     parser_name: petrinex_public
-    landing_page_url: "https://www.petrinex.ca/public-data"
+    landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
     dataset_url: ""
     file_type: csv
     refresh_frequency: monthly
