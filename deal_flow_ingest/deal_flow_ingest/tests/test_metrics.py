@@ -2,7 +2,7 @@ from datetime import date
 
 import pandas as pd
 
-from deal_flow_ingest.transform.metrics import compute_restart_score, month_oil_to_30d_total
+from deal_flow_ingest.transform.metrics import compute_restart_score, compute_well_restart_scores, month_oil_to_30d_total
 
 
 def test_restart_score_bounds():
@@ -15,3 +15,51 @@ def test_monthly_to_30d_approximation():
     m = pd.Timestamp("2025-02-01")
     total30 = month_oil_to_30d_total(2800, m)
     assert round(total30, 2) == round(2800 * (30 / 28), 2)
+
+
+def test_compute_well_restart_scores_empty_prod_short_circuits():
+    wells = pd.DataFrame(
+        {
+            "well_id": [f"W{i}" for i in range(5000)],
+            "status": ["SUSPENDED"] * 2500 + ["ACTIVE"] * 2500,
+        }
+    )
+
+    out = compute_well_restart_scores(wells, pd.DataFrame(), date(2025, 1, 31))
+
+    assert out.empty
+    assert list(out.columns) == [
+        "as_of_date",
+        "well_id",
+        "current_status",
+        "last_prod_month",
+        "avg_oil_bpd_last_3mo_before_shutin",
+        "avg_oil_bpd_last_12mo_before_shutin",
+        "shutin_recency_days",
+        "restart_score",
+        "flags",
+    ]
+
+
+def test_compute_well_restart_scores_only_uses_suspended_candidates():
+    wells = pd.DataFrame(
+        {
+            "well_id": ["W1", "W2", "W3", "W4"],
+            "status": ["SUSPENDED", "inactive", "SHUT-IN", "ACTIVE"],
+        }
+    )
+    prod = pd.DataFrame(
+        {
+            "month": ["2025-01-01", "2025-01-01", "2025-01-01", "2025-01-01"],
+            "well_id": ["W1", "W2", "W3", "W4"],
+            "oil_bbl": [100.0, 50.0, 10.0, 500.0],
+            "gas_mcf": [0.0, 0.0, 0.0, 0.0],
+            "water_bbl": [0.0, 0.0, 0.0, 0.0],
+            "is_estimated": [False, True, False, False],
+        }
+    )
+
+    out = compute_well_restart_scores(wells, prod, date(2025, 1, 31))
+
+    assert set(out["well_id"]) == {"W1", "W2", "W3"}
+    assert "W4" not in set(out["well_id"])
