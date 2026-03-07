@@ -2,8 +2,29 @@ from __future__ import annotations
 
 from calendar import monthrange
 from datetime import date
+import logging
 
+import numpy as np
 import pandas as pd
+
+
+LOGGER = logging.getLogger(__name__)
+
+RESTART_SCORE_COLUMNS = [
+    "as_of_date",
+    "well_id",
+    "current_status",
+    "last_prod_month",
+    "avg_oil_bpd_last_3mo_before_shutin",
+    "avg_oil_bpd_last_12mo_before_shutin",
+    "shutin_recency_days",
+    "restart_score",
+    "flags",
+]
+
+
+def empty_restart_scores_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=RESTART_SCORE_COLUMNS)
 
 
 def month_oil_to_30d_total(oil_bbl: float, month: pd.Timestamp) -> float:
@@ -30,59 +51,82 @@ def compute_well_restart_scores(
 ) -> pd.DataFrame:
     suspended_statuses = suspended_statuses or {"SUSPENDED", "INACTIVE", "SHUT-IN", "SHUTIN"}
     if wells_df.empty:
-        return pd.DataFrame()
+        return empty_restart_scores_df()
+
+    candidate_wells = wells_df.copy()
+    candidate_wells["current_status"] = candidate_wells["status"].astype(str).str.upper().str.strip()
+    candidate_wells = candidate_wells[candidate_wells["current_status"].isin(suspended_statuses)][["well_id", "current_status"]]
+    if candidate_wells.empty:
+        return empty_restart_scores_df()
+
+    if well_prod_df.empty:
+        LOGGER.info("Skipping restart score computation because no well production data is available")
+        return empty_restart_scores_df()
 
     prod = well_prod_df.copy()
-    if not prod.empty:
-        prod["month"] = pd.to_datetime(prod["month"]).dt.to_period("M").dt.to_timestamp()
+    prod["month"] = pd.to_datetime(prod["month"]).dt.to_period("M").dt.to_timestamp()
+    prod["well_id"] = prod["well_id"].astype(str)
 
-    rows: list[dict] = []
-    for _, well in wells_df.iterrows():
-        status = str(well.get("status") or "").upper().strip()
-        if status not in suspended_statuses:
-            continue
-        well_id = well["well_id"]
-        wp = prod[prod["well_id"] == well_id].sort_values("month") if not prod.empty else pd.DataFrame()
-        if wp.empty:
-            rows.append(
-                {
-                    "as_of_date": as_of_date,
-                    "well_id": well_id,
-                    "current_status": status,
-                    "last_prod_month": None,
-                    "avg_oil_bpd_last_3mo_before_shutin": 0.0,
-                    "avg_oil_bpd_last_12mo_before_shutin": 0.0,
-                    "shutin_recency_days": None,
-                    "restart_score": 0.0,
-                    "flags": {"reason": "no_production_history"},
-                }
-            )
-            continue
+    production_cols = [c for c in ["oil_bbl", "gas_mcf", "water_bbl"] if c in prod.columns]
+    if not production_cols:
+        production_cols = ["oil_bbl"]
+    prod[production_cols] = prod[production_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    nonzero_mask = prod[production_cols].ne(0.0).any(axis=1)
+    if not bool(nonzero_mask.any()):
+        LOGGER.info("Skipping restart score computation because no well production data is available")
+        return empty_restart_scores_df()
 
-        last_prod_month = wp["month"].max()
-        last3 = wp[wp["month"] >= last_prod_month - pd.DateOffset(months=2)]
-        last12 = wp[wp["month"] >= last_prod_month - pd.DateOffset(months=11)]
-        avg3_monthly = float(last3["oil_bbl"].mean()) if not last3.empty else 0.0
-        avg12_monthly = float(last12["oil_bbl"].mean()) if not last12.empty else 0.0
-        avg3_bpd = avg3_monthly / 30.0
-        avg12_bpd = avg12_monthly / 30.0
-        shutin_recency_days = (pd.Timestamp(as_of_date) - (last_prod_month + pd.offsets.MonthEnd(0))).days
-        score = compute_restart_score(avg3_bpd, avg12_bpd, shutin_recency_days)
-        rows.append(
-            {
-                "as_of_date": as_of_date,
-                "well_id": well_id,
-                "current_status": status,
-                "last_prod_month": last_prod_month.date(),
-                "avg_oil_bpd_last_3mo_before_shutin": avg3_bpd,
-                "avg_oil_bpd_last_12mo_before_shutin": avg12_bpd,
-                "shutin_recency_days": shutin_recency_days,
-                "restart_score": score,
-                "flags": {"method": "screening_estimate" if bool(wp.get("is_estimated", False).any()) else "observed"},
-            }
-        )
+    candidate_wells["well_id"] = candidate_wells["well_id"].astype(str)
+    prod = prod[nonzero_mask & prod["well_id"].isin(candidate_wells["well_id"])]
 
-    return pd.DataFrame(rows)
+    last_prod_month = prod.groupby("well_id")["month"].max().rename("last_prod_month")
+    prod = prod.join(last_prod_month, on="well_id")
+    month_delta = (
+        (prod["last_prod_month"].dt.year - prod["month"].dt.year) * 12
+        + (prod["last_prod_month"].dt.month - prod["month"].dt.month)
+    )
+    avg3 = (prod[month_delta <= 2].groupby("well_id")["oil_bbl"].mean() / 30.0).rename(
+        "avg_oil_bpd_last_3mo_before_shutin"
+    )
+    avg12 = (prod[month_delta <= 11].groupby("well_id")["oil_bbl"].mean() / 30.0).rename(
+        "avg_oil_bpd_last_12mo_before_shutin"
+    )
+    est_col = prod["is_estimated"] if "is_estimated" in prod.columns else pd.Series(False, index=prod.index)
+    is_estimated = est_col.fillna(False).astype(bool).groupby(prod["well_id"]).any().rename("is_estimated")
+
+    scores = candidate_wells.merge(last_prod_month.reset_index(), on="well_id", how="left")
+    scores = scores.merge(avg3.reset_index(), on="well_id", how="left")
+    scores = scores.merge(avg12.reset_index(), on="well_id", how="left")
+    scores = scores.merge(is_estimated.reset_index(), on="well_id", how="left")
+
+    has_prod = scores["last_prod_month"].notna()
+    scores["avg_oil_bpd_last_3mo_before_shutin"] = scores["avg_oil_bpd_last_3mo_before_shutin"].fillna(0.0)
+    scores["avg_oil_bpd_last_12mo_before_shutin"] = scores["avg_oil_bpd_last_12mo_before_shutin"].fillna(0.0)
+    scores["shutin_recency_days"] = np.where(
+        has_prod,
+        (pd.Timestamp(as_of_date) - (scores["last_prod_month"] + pd.offsets.MonthEnd(0))).dt.days,
+        np.nan,
+    )
+
+    avg3_series = scores["avg_oil_bpd_last_3mo_before_shutin"]
+    avg12_series = scores["avg_oil_bpd_last_12mo_before_shutin"]
+    rate_component = (avg3_series.clip(lower=0.0) * 3.0).clip(upper=60.0)
+    recency_component = (30.0 * (1 - (scores["shutin_recency_days"].fillna(730.0) / 730.0))).clip(lower=0.0)
+    ratio = np.minimum(avg3_series, avg12_series) / np.maximum(avg3_series, avg12_series).replace(0.0, np.nan)
+    stability_component = np.where(avg12_series <= 0.0, 2.0, 10.0 * np.nan_to_num(ratio, nan=0.0))
+    computed_scores = (rate_component + recency_component + stability_component).clip(lower=0.0, upper=100.0)
+    scores["restart_score"] = np.where(has_prod, computed_scores, 0.0)
+    scores["flags"] = np.where(
+        has_prod,
+        np.where(scores["is_estimated"].fillna(False), {"method": "screening_estimate"}, {"method": "observed"}),
+        {"reason": "no_production_history"},
+    )
+    scores["as_of_date"] = as_of_date
+    scores["last_prod_month"] = pd.to_datetime(scores["last_prod_month"], errors="coerce").dt.date
+    scores["shutin_recency_days"] = pd.to_numeric(scores["shutin_recency_days"], errors="coerce").astype("Int64")
+    scores.loc[~has_prod, "shutin_recency_days"] = pd.NA
+
+    return scores[RESTART_SCORE_COLUMNS]
 
 
 def compute_operator_metrics(

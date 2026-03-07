@@ -39,7 +39,7 @@ from deal_flow_ingest.db.schema import (
 )
 from deal_flow_ingest.io.downloader import Downloader
 from deal_flow_ingest.sources import load_dataset
-from deal_flow_ingest.transform.metrics import compute_operator_metrics, compute_well_restart_scores
+from deal_flow_ingest.transform.metrics import compute_operator_metrics, compute_well_restart_scores, empty_restart_scores_df
 from deal_flow_ingest.transform.normalize import month_start, normalize_operator_name, normalize_uwi
 from deal_flow_ingest.transform.opportunities import compute_well_opportunities
 
@@ -391,7 +391,11 @@ def run_ingestion(args: argparse.Namespace) -> int:
             row_counts["loaded"]["fact_operator_liability"] = replace_fact_liability(conn, liability_df, "aer_llr")
 
             restart_input = wells_df[WELL_STATUS_COLUMNS].copy() if not wells_df.empty else _empty_df(WELL_STATUS_COLUMNS)
-            restart_df = compute_well_restart_scores(restart_input, well_prod, end)
+            if well_prod.empty:
+                LOGGER.info("No well production data available; restart scoring skipped")
+                restart_df = empty_restart_scores_df()
+            else:
+                restart_df = compute_well_restart_scores(restart_input, well_prod, end)
             if not restart_df.empty and "flags" in restart_df:
                 restart_df["flags"] = restart_df["flags"].map(
                     lambda value: json.dumps(value) if isinstance(value, (dict, list)) else value
