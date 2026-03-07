@@ -411,12 +411,15 @@ def _parse_st37_text(path: Path) -> pd.DataFrame:
 
     header_idx, delimiter = _detect_header_and_delimiter(non_empty)
     if header_idx is not None and delimiter:
+        LOGGER.info("ST37 parser mode=delimited delimiter=%s", delimiter)
         parsed = _parse_delimited_st37(non_empty[header_idx:], delimiter)
     else:
+        LOGGER.info("ST37 parser mode=fixed_width")
         parsed = _parse_fixed_width_st37(non_empty)
 
     if parsed.empty:
         return parsed
+    LOGGER.info("ST37 parser rows parsed=%s", len(parsed.index))
     return parsed
 
 
@@ -472,8 +475,7 @@ def _parse_fixed_width_st37(lines: list[str]) -> pd.DataFrame:
             elif uwi in parts:
                 uwi_idx = parts.index(uwi)
                 candidate_status = parts[uwi_idx + 1] if len(parts) > uwi_idx + 1 else ""
-        if len(parts) >= 3:
-            candidate_licensee = parts[-1]
+        candidate_licensee = _extract_licensee_fixed_width(parts, uwi)
 
         lsd, section, township, rng, meridian = _parse_location_from_uwi(uwi)
         records.append(
@@ -493,6 +495,40 @@ def _parse_fixed_width_st37(lines: list[str]) -> pd.DataFrame:
         LOGGER.info("ST37 parser skipped %s malformed fixed-width rows", skipped)
     return pd.DataFrame(records)
 
+
+
+
+def _extract_licensee_fixed_width(parts: list[str], uwi: str) -> str:
+    if not parts:
+        return ""
+    if uwi in parts:
+        uwi_idx = parts.index(uwi)
+        trailing = [p for p in parts[uwi_idx + 2 :] if p]
+    elif parts and parts[0] == uwi:
+        trailing = [p for p in parts[2:] if p]
+    else:
+        trailing = [p for p in parts[1:] if p]
+
+    if not trailing:
+        return ""
+
+    for candidate in reversed(trailing):
+        cleaned = candidate.strip()
+        if not cleaned:
+            continue
+        upper = cleaned.upper()
+        if upper in {"ACTIVE", "INACTIVE", "SUSPENDED", "SHUT-IN", "SHUTIN"}:
+            continue
+        if re.fullmatch(r"[A-Z]?\d+", upper):
+            continue
+        tokens = [t for t in re.split(r"\s+", cleaned) if t]
+        alpha_tokens = [t for t in tokens if re.search(r"[A-Za-z]", t)]
+        has_digits = bool(re.search(r"\d", cleaned))
+        if len(alpha_tokens) >= 2:
+            return cleaned
+        if len(alpha_tokens) == 1 and len(alpha_tokens[0]) >= 5 and " " in cleaned and not has_digits:
+            return cleaned
+    return ""
 
 def _map_st37_record(record: dict[str, str]) -> dict[str, str]:
     uwi = _first_present(record, ["uwi", "well_id", "wellid", "well identifier"])

@@ -2,7 +2,7 @@ from datetime import date
 
 import pandas as pd
 
-from deal_flow_ingest.transform.metrics import compute_restart_score, compute_well_restart_scores, month_oil_to_30d_total
+from deal_flow_ingest.transform.metrics import compute_operator_metrics, compute_restart_score, compute_well_restart_scores, month_oil_to_30d_total
 
 
 def test_restart_score_bounds():
@@ -63,3 +63,21 @@ def test_compute_well_restart_scores_only_uses_suspended_candidates():
 
     assert set(out["well_id"]) == {"W1", "W2", "W3"}
     assert "W4" not in set(out["well_id"])
+
+
+
+def test_compute_operator_metrics_returns_rows_without_production():
+    wells = pd.DataFrame({"well_id": ["W1"], "licensee_operator_id": [101], "status": ["SUSPENDED"]})
+    restart = pd.DataFrame({
+        "well_id": ["W1"],
+        "restart_score": [60.0],
+        "avg_oil_bpd_last_3mo_before_shutin": [5.0],
+    })
+    liability = pd.DataFrame({"operator_id": [101], "ratio": [0.8], "inactive_wells": [10], "active_wells": [5]})
+
+    out = compute_operator_metrics(pd.DataFrame(), liability, restart, wells, date(2025, 1, 31))
+
+    assert len(out) == 1
+    assert int(out.iloc[0]["operator_id"]) == 101
+    assert float(out.iloc[0]["avg_oil_bpd_30d"]) == 0.0
+    assert int(out.iloc[0]["restart_candidates_count"]) == 1

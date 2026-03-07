@@ -315,3 +315,19 @@ def test_parse_well_table_uses_detected_licensee_column(tmp_path: Path):
     parsed = _parse_well_table(sample)
 
     assert list(parsed["licensee"]) == ["ALPHA ENERGY", "BETA RESOURCES"]
+
+
+
+def test_parse_st37_text_fixed_width_keeps_licensee_blank_when_low_confidence(tmp_path: Path):
+    sample = tmp_path / "st37_fixed_width.txt"
+    sample.write_text(
+        "00/12-34-056-07W4  ACTIVE  12345\n"
+        "00/11-33-055-06W4  SUSPENDED  AB123\n",
+        encoding="utf-8",
+    )
+
+    parsed = _parse_st37_text(sample)
+
+    assert len(parsed) == 2
+    assert parsed["licensee"].fillna("").tolist() == ["", ""]
+    assert parsed.iloc[0]["status"] == "ACTIVE"

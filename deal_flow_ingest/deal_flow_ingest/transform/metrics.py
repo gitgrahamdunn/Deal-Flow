@@ -136,17 +136,28 @@ def compute_operator_metrics(
     wells_df: pd.DataFrame,
     as_of_date: date,
 ) -> pd.DataFrame:
-    if operator_prod_df.empty:
-        return pd.DataFrame()
-
     prod = operator_prod_df.copy()
-    prod["month"] = pd.to_datetime(prod["month"]).dt.to_period("M").dt.to_timestamp()
+    if not prod.empty and "month" in prod.columns:
+        prod["month"] = pd.to_datetime(prod["month"]).dt.to_period("M").dt.to_timestamp()
+    else:
+        prod = pd.DataFrame(columns=["month", "operator_id", "oil_bbl"])
     as_of_ts = pd.Timestamp(as_of_date)
     current_month = as_of_ts.to_period("M").to_timestamp()
 
+    operator_ids: set[int] = set()
+    if not prod.empty and "operator_id" in prod.columns:
+        operator_ids.update(pd.to_numeric(prod["operator_id"], errors="coerce").dropna().astype(int).tolist())
+    if not wells_df.empty and "licensee_operator_id" in wells_df.columns:
+        operator_ids.update(pd.to_numeric(wells_df["licensee_operator_id"], errors="coerce").dropna().astype(int).tolist())
+    if not liability_df.empty and "operator_id" in liability_df.columns:
+        operator_ids.update(pd.to_numeric(liability_df["operator_id"], errors="coerce").dropna().astype(int).tolist())
+
+    if not operator_ids:
+        return pd.DataFrame()
+
     rows = []
-    for operator_id, grp in prod.groupby("operator_id"):
-        grp = grp.sort_values("month")
+    for operator_id in sorted(operator_ids):
+        grp = prod[prod["operator_id"] == operator_id].sort_values("month") if not prod.empty else pd.DataFrame(columns=["month", "oil_bbl"])
         latest = grp[grp["month"] == current_month]
         latest_oil = float(latest["oil_bbl"].sum()) if not latest.empty else 0.0
         total30 = month_oil_to_30d_total(latest_oil, current_month)
@@ -160,14 +171,14 @@ def compute_operator_metrics(
         yoy = ((total365 - prev_total) / prev_total * 100.0) if prev_total > 0 else None
         decline_score = min(100.0, max(0.0, -(yoy or 0.0)))
 
-        op_liability = liability_df[liability_df["operator_id"] == operator_id]
+        op_liability = liability_df[liability_df["operator_id"] == operator_id] if (not liability_df.empty and "operator_id" in liability_df.columns) else pd.DataFrame()
         ratio = float(op_liability["ratio"].iloc[-1]) if not op_liability.empty and pd.notna(op_liability["ratio"].iloc[-1]) else None
         inactive = float(op_liability["inactive_wells"].iloc[-1]) if not op_liability.empty and pd.notna(op_liability["inactive_wells"].iloc[-1]) else 0.0
         active = float(op_liability["active_wells"].iloc[-1]) if not op_liability.empty and pd.notna(op_liability["active_wells"].iloc[-1]) else 0.0
         inactive_ratio = inactive / active if active else 0.0
 
-        wells = wells_df[wells_df["licensee_operator_id"] == operator_id]
-        op_restart = restart_df[restart_df["well_id"].isin(wells["well_id"])] if not restart_df.empty else pd.DataFrame()
+        wells = wells_df[wells_df["licensee_operator_id"] == operator_id] if (not wells_df.empty and "licensee_operator_id" in wells_df.columns) else pd.DataFrame(columns=["well_id"])
+        op_restart = restart_df[restart_df["well_id"].isin(wells["well_id"])] if (not restart_df.empty and "well_id" in restart_df.columns) else pd.DataFrame()
         suspended = int(len(op_restart))
         candidates = op_restart[op_restart["restart_score"] >= 50.0] if not op_restart.empty else pd.DataFrame()
         restart_count = int(len(candidates))
