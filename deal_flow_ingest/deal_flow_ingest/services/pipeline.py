@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,7 @@ from deal_flow_ingest.db.load import (
     replace_fact_restart,
     replace_fact_well_status,
     upsert_bridge_operator_business_associate,
+    _dedupe_wells_df,
     upsert_dim_business_associate,
     upsert_dim_facility,
     upsert_dim_operator,
@@ -46,6 +48,35 @@ from deal_flow_ingest.transform.metrics import compute_operator_metrics, compute
 from deal_flow_ingest.transform.normalize import month_start, normalize_operator_name, normalize_uwi
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _PhaseLogger:
+    def __init__(self, name: str, rows_getter=None):
+        self.name = name
+        self.rows_getter = rows_getter
+        self.started = 0.0
+
+    def __enter__(self):
+        self.started = time.perf_counter()
+        LOGGER.info("[phase] %s - start", self.name)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed = time.perf_counter() - self.started
+        rows = None
+        if self.rows_getter is not None:
+            try:
+                rows = self.rows_getter()
+            except Exception:  # pragma: no cover - logging fallback
+                rows = None
+        if rows is None:
+            LOGGER.info("[phase] %s - end elapsed=%.2fs", self.name, elapsed)
+        else:
+            LOGGER.info("[phase] %s - end rows=%s elapsed=%.2fs", self.name, rows, elapsed)
+
+
+def _phase(name: str, rows_getter=None) -> _PhaseLogger:
+    return _PhaseLogger(name, rows_getter)
 
 WELL_DIM_COLUMNS = [
     "well_id",
@@ -382,7 +413,19 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
         upgrade_to_head()
         engine = get_engine(get_database_url())
         with engine.begin() as conn:
-            operator_map = upsert_dim_operator(conn, prepare_operator_dim_inputs(frames_by_kind), source="multi_source")
+            with _phase("Preparing operator source inputs", lambda: len(operator_inputs)):
+                operator_inputs = prepare_operator_dim_inputs(frames_by_kind)
+            raw_operator_count = int(len(operator_inputs))
+            distinct_normalized_operator_count = int(
+                operator_inputs["name_raw"].fillna("").astype(str).map(normalize_operator_name).replace("", pd.NA).dropna().nunique()
+            ) if not operator_inputs.empty else 0
+            LOGGER.info(
+                "Operator input profile: raw_operator_strings=%s distinct_non_empty_normalized_names=%s",
+                raw_operator_count,
+                distinct_normalized_operator_count,
+            )
+            with _phase("Upserting dim_operator", lambda: len(operator_map)):
+                operator_map = upsert_dim_operator(conn, operator_inputs, source="multi_source")
 
             ba_dim, ba_bridge = prepare_business_associate_dfs(frames_by_kind, operator_map)
             row_counts["loaded"]["dim_business_associate"] = len(
@@ -390,61 +433,97 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
             )
             row_counts["loaded"]["bridge_operator_business_associate"] = upsert_bridge_operator_business_associate(conn, ba_bridge)
 
-            wells_df = prepare_wells_df(frames_by_kind, operator_map, end)
-            row_counts["loaded"]["dim_well"] = upsert_dim_well(conn, wells_df)
+            with _phase("Preparing wells dataframe", lambda: len(wells_df)):
+                wells_df = prepare_wells_df(frames_by_kind, operator_map, end)
 
-            fac_df = prepare_facilities_df(frames_by_kind, operator_map)
-            row_counts["loaded"]["dim_facility"] = upsert_dim_facility(conn, fac_df)
+            with _phase("Deduplicating wells dataframe", lambda: len(deduped_wells_preview)):
+                deduped_wells_preview = _dedupe_wells_df(wells_df) if not wells_df.empty else wells_df
 
-            bridge_df = prepare_bridge_df(frames_by_kind)
-            row_counts["loaded"]["bridge_well_facility"] = load_bridge_well_facility(conn, bridge_df)
-
-            fac_prod, well_prod, status_df, op_prod = prepare_production_dfs(frames_by_kind, bridge_df, wells_df, start, end)
-            row_counts["loaded"]["fact_facility_production_monthly"] = replace_fact_by_month_range(
-                conn, FactFacilityProductionMonthly, fac_prod, "petrinex_production", start, end
+            LOGGER.info(
+                "Wells row profile: st37_original_rows=%s deduped_rows=%s",
+                len(wells_df),
+                len(deduped_wells_preview),
             )
-            row_counts["loaded"]["fact_well_production_monthly"] = replace_fact_by_month_range(
-                conn, FactWellProductionMonthly, well_prod, "petrinex_production", start, end
-            )
-            row_counts["loaded"]["fact_well_status"] = replace_fact_well_status(conn, status_df, "aer_st37")
-            row_counts["loaded"]["fact_operator_production_monthly"] = replace_fact_operator_prod(
-                conn, op_prod, "derived_well_estimated", start, end
-            )
+            with _phase("Upserting dim_well", lambda: row_counts["loaded"].get("dim_well", 0)):
+                row_counts["loaded"]["dim_well"] = upsert_dim_well(conn, wells_df)
 
-            liability_raw = _merge_kind_frames(frames_by_kind, "liability")
-            liability_df = _empty_df(LIABILITY_COLUMNS)
-            if not liability_raw.empty:
-                liability_df["as_of_date"] = pd.to_datetime(liability_raw["as_of_date"], errors="coerce").dt.date
-                liability_df["operator_id"] = liability_raw.get("operator", "").astype(str).map(normalize_operator_name).map(operator_map)
-                liability_df["inactive_wells"] = pd.to_numeric(liability_raw.get("inactive_wells", 0), errors="coerce").fillna(0).astype(int)
-                liability_df["active_wells"] = pd.to_numeric(liability_raw.get("active_wells", 0), errors="coerce").fillna(0).astype(int)
-                liability_df["deemed_assets"] = pd.to_numeric(liability_raw.get("deemed_assets", 0), errors="coerce").fillna(0.0)
-                liability_df["deemed_liabilities"] = pd.to_numeric(liability_raw.get("deemed_liabilities", 0), errors="coerce").fillna(0.0)
-                liability_df["ratio"] = pd.to_numeric(liability_raw.get("ratio", 0), errors="coerce")
-                liability_df = liability_df.dropna(subset=["as_of_date", "operator_id"]).copy()
-                liability_df["operator_id"] = liability_df["operator_id"].astype(int)
-                liability_df["source"] = "aer_llr"
-            row_counts["loaded"]["fact_operator_liability"] = replace_fact_liability(conn, liability_df, "aer_llr")
+            with _phase("Preparing facilities dataframe", lambda: len(fac_df)):
+                fac_df = prepare_facilities_df(frames_by_kind, operator_map)
+            with _phase("Upserting dim_facility", lambda: row_counts["loaded"].get("dim_facility", 0)):
+                row_counts["loaded"]["dim_facility"] = upsert_dim_facility(conn, fac_df)
 
-            restart_df = build_restart_scores(wells_df, well_prod, end)
-            restart_df = json_compat_frame(conn, restart_df, ["flags"])
-            row_counts["loaded"]["fact_well_restart_score"] = replace_fact_restart(conn, restart_df, end)
+            with _phase("Preparing bridge dataframe", lambda: len(bridge_df)):
+                bridge_df = prepare_bridge_df(frames_by_kind)
+            with _phase("Loading bridge_well_facility", lambda: row_counts["loaded"].get("bridge_well_facility", 0)):
+                row_counts["loaded"]["bridge_well_facility"] = load_bridge_well_facility(conn, bridge_df)
 
-            metrics_df = build_operator_metrics(op_prod, liability_df, restart_df, wells_df, end)
-            metrics_df = json_compat_frame(conn, metrics_df, ["source_notes"])
-            row_counts["loaded"]["fact_operator_metrics"] = replace_fact_metrics(conn, metrics_df, end)
+            with _phase("Preparing facility production dataframe", lambda: len(fac_prod)):
+                fac_prod, well_prod, status_df, op_prod = prepare_production_dfs(frames_by_kind, bridge_df, wells_df, start, end)
+            with _phase("Loading fact_facility_production_monthly", lambda: row_counts["loaded"].get("fact_facility_production_monthly", 0)):
+                row_counts["loaded"]["fact_facility_production_monthly"] = replace_fact_by_month_range(
+                    conn, FactFacilityProductionMonthly, fac_prod, "petrinex_production", start, end
+                )
 
-            record_ingestion_run(
-                conn,
-                run_id=run_id,
-                started_at=started_at,
-                finished_at=datetime.utcnow(),
-                status="success",
-                sources_ok=sources_ok,
-                sources_failed=sources_failed,
-                row_counts=row_counts,
-                notes="Resilient ingestion run completed",
-            )
+            with _phase("Preparing well production dataframe", lambda: len(well_prod)):
+                well_prod_load_df = well_prod
+            with _phase("Loading fact_well_production_monthly", lambda: row_counts["loaded"].get("fact_well_production_monthly", 0)):
+                row_counts["loaded"]["fact_well_production_monthly"] = replace_fact_by_month_range(
+                    conn, FactWellProductionMonthly, well_prod_load_df, "petrinex_production", start, end
+                )
+
+            with _phase("Preparing well status dataframe", lambda: len(status_df)):
+                status_load_df = status_df
+            with _phase("Loading fact_well_status", lambda: row_counts["loaded"].get("fact_well_status", 0)):
+                row_counts["loaded"]["fact_well_status"] = replace_fact_well_status(conn, status_load_df, "aer_st37")
+
+            with _phase("Preparing operator production dataframe", lambda: len(op_prod)):
+                op_prod_load_df = op_prod
+            with _phase("Loading fact_operator_production_monthly", lambda: row_counts["loaded"].get("fact_operator_production_monthly", 0)):
+                row_counts["loaded"]["fact_operator_production_monthly"] = replace_fact_operator_prod(
+                    conn, op_prod_load_df, "derived_well_estimated", start, end
+                )
+
+            with _phase("Preparing liability dataframe", lambda: len(liability_df)):
+                liability_raw = _merge_kind_frames(frames_by_kind, "liability")
+                liability_df = _empty_df(LIABILITY_COLUMNS)
+                if not liability_raw.empty:
+                    liability_df["as_of_date"] = pd.to_datetime(liability_raw["as_of_date"], errors="coerce").dt.date
+                    liability_df["operator_id"] = liability_raw.get("operator", "").astype(str).map(normalize_operator_name).map(operator_map)
+                    liability_df["inactive_wells"] = pd.to_numeric(liability_raw.get("inactive_wells", 0), errors="coerce").fillna(0).astype(int)
+                    liability_df["active_wells"] = pd.to_numeric(liability_raw.get("active_wells", 0), errors="coerce").fillna(0).astype(int)
+                    liability_df["deemed_assets"] = pd.to_numeric(liability_raw.get("deemed_assets", 0), errors="coerce").fillna(0.0)
+                    liability_df["deemed_liabilities"] = pd.to_numeric(liability_raw.get("deemed_liabilities", 0), errors="coerce").fillna(0.0)
+                    liability_df["ratio"] = pd.to_numeric(liability_raw.get("ratio", 0), errors="coerce")
+                    liability_df = liability_df.dropna(subset=["as_of_date", "operator_id"]).copy()
+                    liability_df["operator_id"] = liability_df["operator_id"].astype(int)
+                    liability_df["source"] = "aer_llr"
+            with _phase("Loading fact_operator_liability", lambda: row_counts["loaded"].get("fact_operator_liability", 0)):
+                row_counts["loaded"]["fact_operator_liability"] = replace_fact_liability(conn, liability_df, "aer_llr")
+
+            with _phase("Computing restart scores", lambda: len(restart_df)):
+                restart_df = build_restart_scores(wells_df, well_prod, end)
+                restart_df = json_compat_frame(conn, restart_df, ["flags"])
+            with _phase("Loading fact_well_restart_score", lambda: row_counts["loaded"].get("fact_well_restart_score", 0)):
+                row_counts["loaded"]["fact_well_restart_score"] = replace_fact_restart(conn, restart_df, end)
+
+            with _phase("Computing operator metrics", lambda: len(metrics_df)):
+                metrics_df = build_operator_metrics(op_prod, liability_df, restart_df, wells_df, end)
+                metrics_df = json_compat_frame(conn, metrics_df, ["source_notes"])
+            with _phase("Loading fact_operator_metrics", lambda: row_counts["loaded"].get("fact_operator_metrics", 0)):
+                row_counts["loaded"]["fact_operator_metrics"] = replace_fact_metrics(conn, metrics_df, end)
+
+            with _phase("Recording ingestion_run", lambda: 1):
+                record_ingestion_run(
+                    conn,
+                    run_id=run_id,
+                    started_at=started_at,
+                    finished_at=datetime.utcnow(),
+                    status="success",
+                    sources_ok=sources_ok,
+                    sources_failed=sources_failed,
+                    row_counts=row_counts,
+                    notes="Resilient ingestion run completed",
+                )
 
             top_prod = pd.DataFrame()
             top_restart = pd.DataFrame()

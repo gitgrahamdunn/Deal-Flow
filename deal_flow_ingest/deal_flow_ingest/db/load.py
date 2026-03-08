@@ -63,6 +63,7 @@ def _execute_insert_in_chunks(conn: Connection, model, payload: list[dict], labe
         return 0
     chunk_size = _insert_chunk_size(conn)
     total_chunks = (len(payload) + chunk_size - 1) // chunk_size
+    logger.info("Starting inserts into %s", label)
     logger.info("Loading %s in chunks of %s (%s rows)", label, chunk_size, len(payload))
     for idx, rows in enumerate(chunked(payload, chunk_size), start=1):
         conn.execute(insert(model), rows)
