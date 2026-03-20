@@ -11,7 +11,11 @@ from deal_flow_ingest.db.schema import get_engine
 SQL_FILES = (
     Path("sql/views/deal_flow_targets.sql"),
     Path("sql/views/restart_well_candidates.sql"),
+    Path("sql/views/asset_clusters.sql"),
+    Path("sql/views/package_candidates.sql"),
+    Path("sql/views/operator_area_footprints.sql"),
     Path("sql/views/deal_flow_opportunities.sql"),
+    Path("sql/views/seller_theses.sql"),
 )
 
 

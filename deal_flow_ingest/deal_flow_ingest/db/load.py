@@ -264,15 +264,7 @@ def upsert_bridge_operator_business_associate(conn: Connection, df: pd.DataFrame
 
     working["operator_id"] = working["operator_id"].astype(int)
     working = working.drop_duplicates(subset=["operator_id", "ba_id"], keep="last")
-
-    keys_df = working[["operator_id", "ba_id"]].drop_duplicates()
-    key_tuples = [tuple(x) for x in keys_df.to_records(index=False)]
-    _delete_tuple_in_chunks(
-        conn,
-        BridgeOperatorBusinessAssociate,
-        (BridgeOperatorBusinessAssociate.operator_id, BridgeOperatorBusinessAssociate.ba_id),
-        key_tuples,
-    )
+    conn.execute(delete(BridgeOperatorBusinessAssociate))
 
     payload = working.to_dict(orient="records")
     return _execute_insert_in_chunks(conn, BridgeOperatorBusinessAssociate, payload, "bridge_operator_business_associate")
@@ -324,20 +316,47 @@ def load_bridge_well_facility(conn: Connection, bridge_df: pd.DataFrame) -> int:
     return _execute_insert_in_chunks(conn, BridgeWellFacility, payload, "bridge_well_facility")
 
 
+def _delete_matching_fact_rows(conn: Connection, model, df: pd.DataFrame, key_columns: list[str]) -> None:
+    if df.empty:
+        return
+    keys = df[key_columns].drop_duplicates()
+    key_tuples = [tuple(x) for x in keys.to_records(index=False)]
+    columns = tuple(getattr(model, column) for column in key_columns)
+    _delete_tuple_in_chunks(conn, model, columns, key_tuples)
+
+
 def replace_fact_by_month_range(conn: Connection, model, df: pd.DataFrame, source: str, start: date, end: date) -> int:
-    conn.execute(delete(model).where(model.month >= start, model.month <= end, model.source == source))
+    if df.empty:
+        conn.execute(delete(model).where(model.month >= start, model.month <= end, model.source == source))
+    else:
+        min_month = df["month"].min()
+        max_month = df["month"].max()
+        source_values = df["source"].dropna().astype(str).unique().tolist() if "source" in df.columns else [source]
+        conn.execute(delete(model).where(model.month >= min_month, model.month <= max_month, model.source.in_(source_values)))
     payload = df.to_dict(orient="records")
     return _execute_insert_in_chunks(conn, model, payload, model.__tablename__)
 
 
 def replace_fact_operator_prod(conn: Connection, df: pd.DataFrame, source: str, start: date, end: date) -> int:
-    conn.execute(
-        delete(FactOperatorProductionMonthly).where(
-            FactOperatorProductionMonthly.month >= start,
-            FactOperatorProductionMonthly.month <= end,
-            FactOperatorProductionMonthly.source == source,
+    if df.empty:
+        conn.execute(
+            delete(FactOperatorProductionMonthly).where(
+                FactOperatorProductionMonthly.month >= start,
+                FactOperatorProductionMonthly.month <= end,
+                FactOperatorProductionMonthly.source == source,
+            )
         )
-    )
+    else:
+        min_month = df["month"].min()
+        max_month = df["month"].max()
+        source_values = df["source"].dropna().astype(str).unique().tolist() if "source" in df.columns else [source]
+        conn.execute(
+            delete(FactOperatorProductionMonthly).where(
+                FactOperatorProductionMonthly.month >= min_month,
+                FactOperatorProductionMonthly.month <= max_month,
+                FactOperatorProductionMonthly.source.in_(source_values),
+            )
+        )
     payload = df.to_dict(orient="records")
     return _execute_insert_in_chunks(conn, FactOperatorProductionMonthly, payload, FactOperatorProductionMonthly.__tablename__)
 
@@ -367,7 +386,8 @@ def replace_fact_metrics(conn: Connection, df: pd.DataFrame, as_of_date: date) -
 
 def replace_fact_restart(conn: Connection, df: pd.DataFrame, as_of_date: date) -> int:
     conn.execute(delete(FactWellRestartScore).where(FactWellRestartScore.as_of_date == as_of_date))
-    payload = df.to_dict(orient="records")
+    cleaned = df.astype(object).where(pd.notnull(df), None)
+    payload = cleaned.to_dict(orient="records")
     return _execute_insert_in_chunks(conn, FactWellRestartScore, payload, FactWellRestartScore.__tablename__)
 
 

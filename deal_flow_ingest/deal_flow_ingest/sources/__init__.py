@@ -11,7 +11,15 @@ from deal_flow_ingest.sources.open_alberta import load_placeholder
 from deal_flow_ingest.sources.petrinex import load_public_data
 
 
-def load_dataset(downloader: Downloader, sample_dir: Path, source: SourcePayload, dry_run: bool, refresh: bool) -> pd.DataFrame:
+def load_dataset(
+    downloader: Downloader,
+    sample_dir: Path,
+    source: SourcePayload,
+    dry_run: bool,
+    refresh: bool,
+    start_date=None,
+    end_date=None,
+) -> pd.DataFrame:
     if dry_run:
         if not source.local_sample:
             raise ValueError(f"No sample file configured for {source.key}")
@@ -24,7 +32,7 @@ def load_dataset(downloader: Downloader, sample_dir: Path, source: SourcePayload
     if source.parser_name == "aer_liability":
         return load_liability(downloader, source, refresh)
     if source.parser_name == "petrinex_public":
-        return load_public_data(downloader, source, refresh)
+        return load_public_data(downloader, source, refresh, start_date=start_date, end_date=end_date)
     if source.parser_name == "open_alberta_placeholder":
         return load_placeholder(downloader, source, refresh)
 

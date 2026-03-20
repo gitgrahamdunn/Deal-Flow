@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import tempfile
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin
+from zipfile import ZipFile
 
 import pandas as pd
 
@@ -11,6 +14,12 @@ from deal_flow_ingest.config import SourcePayload
 from deal_flow_ingest.io.downloader import Downloader
 
 LOGGER = logging.getLogger(__name__)
+
+_PETRINEX_DIRECT_URLS = {
+    "operators": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Business%20Associate/CSV",
+    "well_facility_bridge": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20to%20Facility%20Link/CSV",
+    "facility_master": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Facility%20Infrastructure/CSV",
+}
 
 
 _DATA_KIND_TO_DISCOVERY_KEY = {
@@ -21,11 +30,19 @@ _DATA_KIND_TO_DISCOVERY_KEY = {
 }
 
 
-def load_public_data(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
-    artifact_url = (source.dataset_url or "").strip()
+def load_public_data(
+    downloader: Downloader,
+    source: SourcePayload,
+    refresh: bool,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> pd.DataFrame:
+    artifact_url = (source.dataset_url or _PETRINEX_DIRECT_URLS.get(source.data_kind, "")).strip()
     discovery_key = _DATA_KIND_TO_DISCOVERY_KEY.get(source.data_kind)
 
-    if not artifact_url and source.landing_page_url and discovery_key:
+    if source.data_kind == "facility_production":
+        df = _load_monthly_production_range(downloader, source, refresh, start_date, end_date)
+    elif not artifact_url and source.landing_page_url and discovery_key:
         landing_pages = [source.landing_page_url, *(source.alternate_landing_page_urls or [])]
         for landing_url in [u for u in landing_pages if u]:
             try:
@@ -41,20 +58,15 @@ def load_public_data(downloader: Downloader, source: SourcePayload, refresh: boo
         if not artifact_url:
             LOGGER.warning("No Petrinex artifact discovered for %s from configured landing pages", discovery_key)
             return pd.DataFrame()
-
-    if not artifact_url:
-        LOGGER.warning("Petrinex source %s missing dataset_url and no discovered URL", source.key)
-        return pd.DataFrame()
-
-    try:
-        result = downloader.fetch(source.key, artifact_url, refresh=refresh, file_type=_guess_file_type(artifact_url, source.file_type))
-        df = _read_table(result.path)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Failed to fetch/parse Petrinex artifact %s for %s: %s", artifact_url, source.key, exc)
-        return pd.DataFrame()
+        df = _load_single_petrinex_artifact(downloader, source, artifact_url, refresh)
+    else:
+        if not artifact_url:
+            LOGGER.warning("Petrinex source %s missing dataset_url and no discovered URL", source.key)
+            return pd.DataFrame()
+        df = _load_single_petrinex_artifact(downloader, source, artifact_url, refresh)
 
     if df.empty:
-        LOGGER.warning("Parsed 0 rows for Petrinex dataset %s from %s", source.key, artifact_url)
+        LOGGER.warning("Parsed 0 rows for Petrinex dataset %s", source.key)
         return df
 
     if source.data_kind == "facility_master":
@@ -70,6 +82,72 @@ def load_public_data(downloader: Downloader, source: SourcePayload, refresh: boo
 
     LOGGER.info("Parsed %s rows for Petrinex dataset %s", len(parsed.index), source.key)
     return parsed
+
+
+def _load_single_petrinex_artifact(downloader: Downloader, source: SourcePayload, artifact_url: str, refresh: bool) -> pd.DataFrame:
+    try:
+        result = downloader.fetch(source.key, artifact_url, refresh=refresh, file_type="zip", extract_zip=True)
+        target_path = _resolve_petrinex_artifact(result.path, result.extracted_dir)
+        if target_path is None:
+            LOGGER.warning("No tabular Petrinex artifact found in %s for %s", artifact_url, source.key)
+            return pd.DataFrame()
+        return _read_table(target_path)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to fetch/parse Petrinex artifact %s for %s: %s", artifact_url, source.key, exc)
+        return pd.DataFrame()
+
+
+def _load_monthly_production_range(
+    downloader: Downloader,
+    source: SourcePayload,
+    refresh: bool,
+    start_date: date | None,
+    end_date: date | None,
+) -> pd.DataFrame:
+    if start_date is None or end_date is None:
+        LOGGER.warning("Petrinex monthly production requested without a date range")
+        return pd.DataFrame()
+
+    months = pd.period_range(start=start_date, end=end_date, freq="M")
+    frames: list[pd.DataFrame] = []
+    for month in months:
+        artifact_url = f"https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Vol/{month.strftime('%Y-%m')}/CSV"
+        try:
+            df = _load_single_petrinex_artifact(downloader, source, artifact_url, refresh)
+        except Exception:  # pragma: no cover - defensive; helper already swallows most errors
+            df = pd.DataFrame()
+        if df.empty:
+            LOGGER.info("No Petrinex monthly production rows for %s", month.strftime("%Y-%m"))
+            continue
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _resolve_petrinex_artifact(path: Path, extracted_dir: Path | None) -> Path | None:
+    candidates: list[Path] = []
+    if extracted_dir and extracted_dir.exists():
+        candidates.extend(sorted(p for p in extracted_dir.rglob("*") if p.is_file()))
+    else:
+        candidates.append(path)
+
+    for candidate in candidates:
+        suffix = candidate.suffix.lower()
+        if suffix in {".csv", ".xlsx", ".xls"}:
+            return candidate
+        if suffix == ".zip":
+            with tempfile.TemporaryDirectory(prefix="petrinex_inner_") as tmp_dir:
+                tmp_path = Path(tmp_dir)
+                with ZipFile(candidate, "r") as archive:
+                    archive.extractall(tmp_path)
+                nested = _resolve_petrinex_artifact(candidate, tmp_path)
+                if nested is not None:
+                    final_path = candidate.parent / nested.name
+                    final_path.write_bytes(nested.read_bytes())
+                    return final_path
+    return None
 
 
 class _AnchorParser(HTMLParser):
@@ -196,6 +274,7 @@ def load_business_associate(df: pd.DataFrame) -> pd.DataFrame:
         df,
         cols,
         (
+            "baidentifier",
             "business_associate_id",
             "business associate id",
             "ba_id",
@@ -208,10 +287,12 @@ def load_business_associate(df: pd.DataFrame) -> pd.DataFrame:
     out["ba_name_raw"] = _column_as_series(
         df,
         cols,
-        ("business_associate_name", "business associate name", "operator", "company_name", "company name"),
+        ("balegalname", "business_associate_name", "business associate name", "operator", "company_name", "company name"),
         "",
     )
-    out["entity_type"] = _column_as_series(df, cols, ("entity_type", "entity type", "associate_type", "associate type"), None)
+    out["entity_type"] = _column_as_series(
+        df, cols, ("balicenceeligibilitytype", "entity_type", "entity type", "associate_type", "associate type"), None
+    )
     return out
 
 
@@ -221,38 +302,139 @@ def load_facility_master(df: pd.DataFrame) -> pd.DataFrame:
     out["facility_id"] = _column_as_series(
         df,
         cols,
-        ("facility_id", "facility id", "facility", "facility ba id", "facility ba identifier"),
+        ("facilityid", "facility_id", "facility id", "facility", "facility ba id", "facility ba identifier"),
         "",
     )
+    out["facility_type"] = _column_as_series(df, cols, ("facilitytype", "facility_type", "facility type"), None)
     out["facility_operator"] = _column_as_series(
         df,
         cols,
-        ("operator", "operator_name", "operator name", "business_associate_name", "business associate name"),
+        ("operatorname", "operator", "operator_name", "operator name", "business_associate_name", "business associate name"),
         "",
     )
+    out["lsd"] = _column_as_series(df, cols, ("facilitylegalsubdivision", "facility legal subdivision"), None)
+    out["section"] = _column_as_series(df, cols, ("facilitysection", "facility section"), None)
+    out["township"] = _column_as_series(df, cols, ("facilitytownship", "facility township"), None)
+    out["range"] = _column_as_series(df, cols, ("facilityrange", "facility range"), None)
+    out["meridian"] = _column_as_series(df, cols, ("facilitymeridian", "facility meridian"), None)
     return out
 
 
 def load_well_facility_bridge(df: pd.DataFrame) -> pd.DataFrame:
     cols = {c.lower().strip(): c for c in df.columns}
     out = pd.DataFrame(index=df.index)
-    out["well_id"] = _column_as_series(df, cols, ("well_id", "well id", "uwi", "well", "well identifier"), "")
-    out["facility_id"] = _column_as_series(df, cols, ("facility_id", "facility id", "facility", "facility ba id"), "")
+    out["well_id"] = _column_as_series(
+        df, cols, ("wellid", "well_id", "well id", "uwi", "well", "well identifier"), ""
+    )
+    out["facility_id"] = _column_as_series(
+        df, cols, ("linkedfacilityid", "facility_id", "facility id", "facility", "facility ba id"), ""
+    )
+    out["effective_from"] = _column_as_series(df, cols, ("linkedstartdate", "effective_from", "effective from"), None)
     return out
 
 
 def load_monthly_production(df: pd.DataFrame) -> pd.DataFrame:
     cols = {c.lower().strip(): c for c in df.columns}
-    out = pd.DataFrame(index=df.index)
-    out["month"] = _column_as_series(
+    if any(alias in cols for alias in ("oil bbl", "oil_bbl", "gas mcf", "gas_mcf", "water bbl", "water_bbl")):
+        out = pd.DataFrame(index=df.index)
+        out["month"] = _column_as_series(
+            df,
+            cols,
+            ("productionmonth", "production_month", "production month", "month", "activity_month", "activity month"),
+            "",
+        )
+        out["facility_id"] = _column_as_series(
+            df,
+            cols,
+            ("reportingfacilityid", "facility_id", "facility id", "facility", "facility ba id"),
+            "",
+        )
+        out["oil_bbl"] = _column_as_series(df, cols, ("oil_bbl", "oil bbl", "oil", "oil production"), 0)
+        out["gas_mcf"] = _column_as_series(df, cols, ("gas_mcf", "gas mcf", "gas", "gas production"), 0)
+        out["water_bbl"] = _column_as_series(df, cols, ("water_bbl", "water bbl", "water", "water production"), 0)
+        out["condensate_bbl"] = _column_as_series(df, cols, ("condensate_bbl", "condensate bbl", "condensate"), 0)
+        return out
+
+    working = pd.DataFrame(index=df.index)
+    working["month"] = _column_as_series(
         df,
         cols,
-        ("production_month", "production month", "month", "activity_month", "activity month"),
+        ("productionmonth", "production_month", "production month", "month", "activity_month", "activity month"),
         "",
     )
-    out["facility_id"] = _column_as_series(df, cols, ("facility_id", "facility id", "facility", "facility ba id"), "")
-    out["oil_bbl"] = _column_as_series(df, cols, ("oil_bbl", "oil bbl", "oil", "oil production"), 0)
-    out["gas_mcf"] = _column_as_series(df, cols, ("gas_mcf", "gas mcf", "gas", "gas production"), 0)
-    out["water_bbl"] = _column_as_series(df, cols, ("water_bbl", "water bbl", "water", "water production"), 0)
-    out["condensate_bbl"] = _column_as_series(df, cols, ("condensate_bbl", "condensate bbl", "condensate"), 0)
-    return out
+    working["facility_id"] = _column_as_series(
+        df,
+        cols,
+        ("reportingfacilityid", "facility_id", "facility id", "facility", "facility ba id"),
+        "",
+    )
+    working["well_id"] = _column_as_series(
+        df,
+        cols,
+        ("fromtoid", "from_to_id", "from to id"),
+        "",
+    ).fillna("").astype(str)
+    working["from_to_type"] = _column_as_series(
+        df,
+        cols,
+        ("fromtoidtype", "from_to_id_type", "from to id type"),
+        "",
+    ).fillna("").astype(str)
+    working["activity_id"] = _column_as_series(
+        df,
+        cols,
+        ("activityid", "activity_id", "activity id"),
+        "",
+    ).fillna("").astype(str)
+    proration_product = _column_as_series(
+        df,
+        cols,
+        ("prorationproduct", "proration product"),
+        "",
+    ).fillna("").astype(str)
+    product_id = _column_as_series(df, cols, ("productid", "product id", "product"), "").fillna("").astype(str)
+    working["product"] = proration_product.where(proration_product.str.strip() != "", product_id)
+    working["volume"] = pd.to_numeric(_column_as_series(df, cols, ("volume",), 0), errors="coerce").fillna(0.0)
+
+    if working.empty:
+        return working
+
+    product = working["product"].str.upper().str.strip()
+    oil_mask = product.eq("OIL") | product.str.contains("OIL")
+    gas_mask = (
+        product.eq("GAS")
+        | product.eq("ACGAS")
+        | product.eq("ENTGAS")
+        | product.eq("C1-MX")
+        | product.str.contains("GAS")
+    )
+    water_mask = (
+        product.eq("WATER")
+        | product.eq("FSHWTR")
+        | product.eq("BRKWTR")
+        | product.str.contains("WATER")
+    )
+    condensate_mask = (
+        product.eq("COND")
+        | product.eq("C5-SP")
+        | product.eq("C4-SP")
+        | product.str.contains("COND")
+        | product.str.contains("C5")
+    )
+    working["oil_bbl"] = working["volume"].where(oil_mask, 0.0)
+    working["gas_mcf"] = working["volume"].where(gas_mask, 0.0)
+    working["water_bbl"] = working["volume"].where(water_mask, 0.0)
+    working["condensate_bbl"] = working["volume"].where(condensate_mask, 0.0)
+
+    well_id_is_wi = working["from_to_type"].str.upper().str.strip().eq("WI")
+    well_id_looks_like_wi = working["well_id"].str.upper().str.startswith("ABWI")
+    working["well_id"] = working["well_id"].where(well_id_is_wi | well_id_looks_like_wi, "")
+
+    useful_mask = (
+        working[["oil_bbl", "gas_mcf", "water_bbl", "condensate_bbl"]].ne(0.0).any(axis=1)
+        | working["activity_id"].str.strip().ne("")
+    )
+    return working.loc[
+        useful_mask,
+        ["month", "facility_id", "well_id", "activity_id", "oil_bbl", "gas_mcf", "water_bbl", "condensate_bbl"],
+    ].reset_index(drop=True)

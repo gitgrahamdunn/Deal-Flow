@@ -2,6 +2,8 @@ sources:
   aer_st37:
     enabled: true
     source_name: aer_st37
+    maturity: live_working
+    required_for_live: true
     local_sample: wells_sample.csv
     local_live_file: ""
     parser_name: aer_st37
@@ -13,11 +15,13 @@ sources:
     refresh_frequency: monthly
 
   aer_spatial_data:
-    enabled: true
+    enabled: false
     source_name: aer_spatial
+    maturity: planned
+    required_for_live: false
     local_sample: open_alberta_placeholder.csv
     parser_name: aer_spatial
-    landing_page_url: "https://www.aer.ca/providing-information/data-and-reports/data-and-reports/spatial-data"
+    landing_page_url: "https://www.aer.ca/data-and-performance-reports/activity-and-data/spatial-data"
     dataset_url: ""
     file_type: zip
     refresh_frequency: periodic
@@ -25,56 +29,68 @@ sources:
   petrinex_public_data:
     enabled: true
     source_name: petrinex_business_associate
+    maturity: live_working
+    required_for_live: true
     local_sample: operators_sample.csv
     parser_name: petrinex_public
     landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
-    dataset_url: ""
-    file_type: csv
+    dataset_url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Business%20Associate/CSV"
+    file_type: zip
     refresh_frequency: monthly
 
   petrinex_public_facility_master:
     enabled: true
     source_name: petrinex_facility
+    maturity: live_working
+    required_for_live: true
     local_sample: facility_master_sample.csv
     parser_name: petrinex_public
     landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
-    dataset_url: ""
-    file_type: csv
+    dataset_url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Facility%20Infrastructure/CSV"
+    file_type: zip
     refresh_frequency: monthly
 
   petrinex_public_well_facility_bridge:
     enabled: true
     source_name: petrinex_bridge
+    maturity: live_working
+    required_for_live: true
     local_sample: well_facility_bridge_sample.csv
     parser_name: petrinex_public
     landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
-    dataset_url: ""
-    file_type: csv
+    dataset_url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20to%20Facility%20Link/CSV"
+    file_type: zip
     refresh_frequency: monthly
 
   petrinex_public_monthly_production:
     enabled: true
     source_name: petrinex_production
+    maturity: live_working
+    required_for_live: true
     local_sample: facility_production_sample.csv
     parser_name: petrinex_public
     landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
     dataset_url: ""
-    file_type: csv
+    file_type: zip
     refresh_frequency: monthly
 
   aer_liability:
-    enabled: true
+    enabled: false
     source_name: aer_llr
+    maturity: planned
+    required_for_live: false
     local_sample: liability_sample.csv
     parser_name: aer_liability
-    landing_page_url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/licensee-liability-rating-program"
+    landing_page_url: "https://www.aer.ca/data-and-performance-reports/industry-performance/liability-management-performance-report"
     dataset_url: ""
     file_type: csv
     refresh_frequency: monthly
 
   open_alberta_placeholder:
-    enabled: true
+    enabled: false
     source_name: open_alberta
+    maturity: planned
+    required_for_live: false
     local_sample: open_alberta_placeholder.csv
     parser_name: open_alberta_placeholder
     landing_page_url: "https://open.alberta.ca/opendata"

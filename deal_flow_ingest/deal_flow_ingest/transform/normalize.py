@@ -18,6 +18,8 @@ def normalize_operator_name(name: str) -> str:
 def normalize_uwi(value: str) -> str:
     v = (value or "").upper().strip()
     v = re.sub(r"[^A-Z0-9]", "", v)
+    if re.match(r"^[A-Z]{4}\d", v):
+        v = v[4:]
     return v
 
 

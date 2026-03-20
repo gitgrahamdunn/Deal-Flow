@@ -79,3 +79,49 @@ def test_upsert_bridge_operator_business_associate_dedupes_rows():
         assert len(rows) == 2
         pair_map = {(row.operator_id, row.ba_id): row for row in rows}
         assert pair_map[(1, "BA-001")].match_method == "manual"
+
+
+def test_upsert_bridge_operator_business_associate_replaces_existing_rows():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with engine.begin() as conn:
+        conn.execute(
+            DimOperator.__table__.insert(),
+            [{"name_raw": "Operator One", "name_norm": "OPERATOR ONE"}, {"name_raw": "Operator Two", "name_norm": "OPERATOR TWO"}],
+        )
+        upsert_dim_business_associate(
+            conn,
+            pd.DataFrame(
+                {
+                    "ba_id": ["BA-001", "BA-002"],
+                    "ba_name_raw": ["Operator One BA", "Operator Two BA"],
+                }
+            ),
+            source="seed",
+        )
+
+        first = pd.DataFrame(
+            {
+                "operator_id": [1],
+                "ba_id": ["BA-001"],
+                "match_method": ["exact_name"],
+                "confidence": [1.0],
+            }
+        )
+        second = pd.DataFrame(
+            {
+                "operator_id": [2],
+                "ba_id": ["BA-002"],
+                "match_method": ["normalized_name"],
+                "confidence": [0.85],
+            }
+        )
+
+        assert upsert_bridge_operator_business_associate(conn, first) == 1
+        assert upsert_bridge_operator_business_associate(conn, second) == 1
+
+        rows = conn.execute(select(BridgeOperatorBusinessAssociate)).all()
+        assert len(rows) == 1
+        assert rows[0].operator_id == 2
+        assert rows[0].ba_id == "BA-002"

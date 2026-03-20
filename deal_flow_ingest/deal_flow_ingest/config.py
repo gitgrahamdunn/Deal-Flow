@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 class SourceEntry(BaseModel):
     enabled: bool = True
     source_name: str
+    maturity: str = "planned"
+    required_for_live: bool = False
     local_sample: str | None = None
     local_live_file: str | None = None
     parser_name: str = "csv"
@@ -32,6 +34,8 @@ class SourcePayload(BaseModel):
     source_name: str
     data_kind: str
     enabled: bool
+    maturity: str = "planned"
+    required_for_live: bool = False
     local_sample: str | None
     local_live_file: str | None
     parser_name: str
@@ -78,6 +82,8 @@ def iter_enabled_sources(cfg: AppConfig) -> list[SourcePayload]:
                 source_name=entry.source_name,
                 data_kind=DATASET_KIND_MAP.get(key, "unknown"),
                 enabled=entry.enabled,
+                maturity=entry.maturity,
+                required_for_live=entry.required_for_live,
                 local_sample=entry.local_sample,
                 local_live_file=entry.local_live_file,
                 parser_name=entry.parser_name,

@@ -32,8 +32,7 @@ def test_parse_facility_master() -> None:
 
     parsed = load_facility_master(source)
 
-    assert list(parsed.columns) == ["facility_id", "facility_operator"]
-    assert parsed.to_dict("records") == [
+    assert parsed[["facility_id", "facility_operator"]].to_dict("records") == [
         {"facility_id": "ABCF001", "facility_operator": "Operator One"},
         {"facility_id": "ABCF002", "facility_operator": "Operator Two"},
     ]
@@ -44,7 +43,6 @@ def test_parse_well_facility_bridge() -> None:
 
     parsed = load_well_facility_bridge(source)
 
-    assert list(parsed.columns) == ["well_id", "facility_id"]
     assert parsed.iloc[0]["well_id"] == 1000111222333444
     assert parsed.iloc[0]["facility_id"] == "ABCF001"
 
@@ -62,6 +60,61 @@ def test_parse_monthly_production() -> None:
         "gas_mcf": 200,
         "water_bbl": 30,
         "condensate_bbl": 4,
+    }
+
+
+def test_parse_monthly_production_uses_product_id_when_proration_product_blank() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "ProductionMonth": "2024-01",
+                "ReportingFacilityID": "ABCF001",
+                "ProrationProduct": None,
+                "ProductID": "OIL",
+                "Volume": 10,
+            },
+            {
+                "ProductionMonth": "2024-01",
+                "ReportingFacilityID": "ABCF001",
+                "ProrationProduct": None,
+                "ProductID": "GAS",
+                "Volume": 200,
+            },
+            {
+                "ProductionMonth": "2024-01",
+                "ReportingFacilityID": "ABCF001",
+                "ProrationProduct": None,
+                "ProductID": "FSHWTR",
+                "Volume": 30,
+            },
+            {
+                "ProductionMonth": "2024-01",
+                "ReportingFacilityID": "ABCF001",
+                "ProrationProduct": None,
+                "ProductID": "C5-SP",
+                "Volume": 4,
+            },
+        ]
+    )
+
+    parsed = load_monthly_production(source)
+
+    assert list(parsed.columns) == [
+        "month",
+        "facility_id",
+        "well_id",
+        "activity_id",
+        "oil_bbl",
+        "gas_mcf",
+        "water_bbl",
+        "condensate_bbl",
+    ]
+    summed = parsed[["oil_bbl", "gas_mcf", "water_bbl", "condensate_bbl"]].sum().to_dict()
+    assert summed == {
+        "oil_bbl": 10.0,
+        "gas_mcf": 200.0,
+        "water_bbl": 30.0,
+        "condensate_bbl": 4.0,
     }
 
 

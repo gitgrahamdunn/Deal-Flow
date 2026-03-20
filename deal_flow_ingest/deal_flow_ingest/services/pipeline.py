@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 
 from deal_flow_ingest.config import get_database_url, iter_enabled_sources, load_config
@@ -40,6 +41,7 @@ from deal_flow_ingest.db.schema import (
     FactOperatorProductionMonthly,
     FactWellProductionMonthly,
     FactWellRestartScore,
+    FactWellStatus,
     get_engine,
 )
 from deal_flow_ingest.io.downloader import Downloader
@@ -129,6 +131,12 @@ def _parse_date(s: str | None, default: date) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date() if s else default
 
 
+def _default_live_end_date() -> date:
+    today = date.today()
+    month_start_today = today.replace(day=1)
+    return month_start_today - timedelta(days=1)
+
+
 def _sqlite_db_path(db_url: str) -> Path | None:
     parsed = make_url(db_url)
     if parsed.get_backend_name() != "sqlite":
@@ -184,47 +192,190 @@ def reset_database(force: bool, include_cache: bool = False) -> tuple[int, str]:
     return 0, "Database reset complete"
 
 
+def _latest_artifact_metadata(downloader: Downloader, source_key: str) -> dict[str, Any]:
+    metadata = downloader._load_metadata(source_key)
+    artifacts = metadata.get("artifacts", {})
+    candidates = [value for value in artifacts.values() if isinstance(value, dict)]
+    if not candidates:
+        return {}
+    return max(candidates, key=lambda item: str(item.get("fetched_at", "")))
+
+
+def _build_source_summary(
+    source,
+    *,
+    dry_run: bool,
+    rows_parsed: int,
+    load_status: str,
+    artifact_downloaded: bool,
+    last_result=None,
+    error: str | None = None,
+) -> dict[str, object]:
+    summary: dict[str, object] = {
+        "source": source.key,
+        "data_kind": source.data_kind,
+        "maturity": source.maturity,
+        "required_for_live": source.required_for_live,
+        "rows_parsed": rows_parsed,
+        "artifact_downloaded": artifact_downloaded,
+        "load_status": load_status,
+    }
+    if dry_run:
+        summary["sample_file"] = source.local_sample or ""
+    elif last_result is not None:
+        summary["artifact_url"] = getattr(last_result, "url", None)
+        summary["artifact_path"] = str(last_result.path)
+        summary["status_code"] = int(last_result.status_code)
+        summary["checksum"] = last_result.checksum
+        summary["content_type"] = last_result.content_type
+    if error:
+        summary["error"] = error
+    return summary
+
+
+def _validate_required_live_sources(
+    source_entries: list,
+    row_counts: dict[str, Any],
+    sources_failed: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    for source in source_entries:
+        if source.required_for_live and source.key in sources_failed:
+            errors.append(f"{source.key}: {sources_failed[source.key]}")
+        if not source.required_for_live and row_counts["source_rows"].get(source.key, 0) == 0:
+            warnings.append(f"{source.key}: optional live source returned 0 rows")
+    return errors, warnings
+
+
+def _collect_database_validation(conn) -> dict[str, Any]:
+    table_counts = {
+        "dim_operator": int(conn.execute(select(func.count()).select_from(DimOperator)).scalar_one()),
+        "dim_well": int(conn.execute(select(func.count()).select_from(DimWell)).scalar_one()),
+        "fact_facility_production_monthly": int(
+            conn.execute(select(func.count()).select_from(FactFacilityProductionMonthly)).scalar_one()
+        ),
+        "fact_well_production_monthly": int(
+            conn.execute(select(func.count()).select_from(FactWellProductionMonthly)).scalar_one()
+        ),
+        "fact_operator_production_monthly": int(
+            conn.execute(select(func.count()).select_from(FactOperatorProductionMonthly)).scalar_one()
+        ),
+        "fact_operator_liability": int(conn.execute(select(func.count()).select_from(FactOperatorLiability)).scalar_one()),
+        "fact_well_status": int(conn.execute(select(func.count()).select_from(FactWellStatus)).scalar_one()),
+        "fact_well_restart_score": int(conn.execute(select(func.count()).select_from(FactWellRestartScore)).scalar_one()),
+        "fact_operator_metrics": int(conn.execute(select(func.count()).select_from(FactOperatorMetrics)).scalar_one()),
+    }
+    orphan_checks = {
+        "fact_well_production_without_dim_well": int(
+            conn.execute(
+                select(func.count())
+                .select_from(FactWellProductionMonthly)
+                .outerjoin(DimWell, FactWellProductionMonthly.well_id == DimWell.well_id)
+                .where(DimWell.well_id.is_(None))
+            ).scalar_one()
+        ),
+        "fact_operator_metrics_without_dim_operator": int(
+            conn.execute(
+                select(func.count())
+                .select_from(FactOperatorMetrics)
+                .outerjoin(DimOperator, FactOperatorMetrics.operator_id == DimOperator.operator_id)
+                .where(DimOperator.operator_id.is_(None))
+            ).scalar_one()
+        ),
+    }
+
+    errors = [f"{name}={count}" for name, count in orphan_checks.items() if count > 0]
+    warnings: list[str] = []
+    if table_counts["dim_well"] == 0:
+        warnings.append("dim_well is empty after ingestion")
+    if table_counts["fact_operator_metrics"] == 0:
+        warnings.append("fact_operator_metrics is empty after ingestion")
+    if table_counts["fact_well_production_monthly"] > 0 and table_counts["fact_well_restart_score"] == 0:
+        warnings.append("well production loaded but no restart scores were produced")
+
+    return {
+        "table_counts": table_counts,
+        "orphan_checks": orphan_checks,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
 def prepare_source_frames(args) -> tuple[dict[str, list[pd.DataFrame]], list[str], dict[str, str], dict, list[dict[str, object]]]:
     cfg = load_config(args.config)
     source_entries = [s for s in iter_enabled_sources(cfg) if s.enabled]
     sample_dir = Path(__file__).resolve().parent.parent / "sample_data"
     downloader = Downloader(Path("data/raw"))
+    end_date = _parse_date(getattr(args, "end", None), _default_live_end_date())
+    start_date = _parse_date(getattr(args, "start", None), end_date - timedelta(days=365))
 
     frames_by_kind: dict[str, list[pd.DataFrame]] = {}
     sources_ok: list[str] = []
     sources_failed: dict[str, str] = {}
-    row_counts: dict[str, int | dict] = {"source_rows": {}, "loaded": {}}
+    row_counts: dict[str, Any] = {"source_rows": {}, "loaded": {}, "validation": {"errors": [], "warnings": []}}
     source_summaries: list[dict[str, object]] = []
 
     LOGGER.info("Enabled sources: %s", [s.key for s in source_entries])
 
     for source in source_entries:
         try:
-            df = load_dataset(downloader, sample_dir, source, args.dry_run, args.refresh)
+            downloader.last_result = None
+            df = load_dataset(downloader, sample_dir, source, args.dry_run, args.refresh, start_date=start_date, end_date=end_date)
             frames_by_kind.setdefault(source.data_kind, []).append(df)
             row_counts["source_rows"][source.key] = int(len(df))
-            sources_ok.append(source.key)
             last_result = downloader.last_result
+            artifact_meta = _latest_artifact_metadata(downloader, source.key) if not args.dry_run else {}
+            if last_result is not None and artifact_meta.get("url"):
+                setattr(last_result, "url", artifact_meta.get("url"))
+
+            if not args.dry_run and source.required_for_live and df.empty:
+                message = "required live source returned 0 rows"
+                sources_failed[source.key] = message
+                source_summaries.append(
+                    _build_source_summary(
+                        source,
+                        dry_run=args.dry_run,
+                        rows_parsed=0,
+                        load_status=message,
+                        artifact_downloaded=bool(last_result.downloaded) if last_result else False,
+                        last_result=last_result,
+                        error=message,
+                    )
+                )
+                LOGGER.error("Required live source %s returned 0 rows", source.key)
+                continue
+
+            sources_ok.append(source.key)
             source_summaries.append(
-                {
-                    "source": source.key,
-                    "artifact_downloaded": bool(last_result.downloaded) if last_result else False,
-                    "rows_parsed": int(len(df)),
-                    "load_status": "success",
-                }
+                _build_source_summary(
+                    source,
+                    dry_run=args.dry_run,
+                    rows_parsed=int(len(df)),
+                    load_status="success",
+                    artifact_downloaded=bool(last_result.downloaded) if last_result else False,
+                    last_result=last_result,
+                )
             )
             LOGGER.info("Loaded source %s (%s rows)", source.key, len(df))
         except Exception as exc:
             sources_failed[source.key] = str(exc)
             source_summaries.append(
-                {
-                    "source": source.key,
-                    "artifact_downloaded": False,
-                    "rows_parsed": 0,
-                    "load_status": f"failed: {exc}",
-                }
+                _build_source_summary(
+                    source,
+                    dry_run=args.dry_run,
+                    rows_parsed=0,
+                    load_status=f"failed: {exc}",
+                    artifact_downloaded=False,
+                    error=str(exc),
+                )
             )
             LOGGER.exception("Failed to load source %s", source.key)
+
+    if not args.dry_run:
+        required_errors, optional_warnings = _validate_required_live_sources(source_entries, row_counts, sources_failed)
+        row_counts["validation"]["errors"].extend(required_errors)
+        row_counts["validation"]["warnings"].extend(optional_warnings)
 
     return frames_by_kind, sources_ok, sources_failed, row_counts, source_summaries
 
@@ -241,11 +392,14 @@ def prepare_operator_dim_inputs(frames_by_kind: dict[str, list[pd.DataFrame]]) -
     facilities = _merge_kind_frames(frames_by_kind, "facility_master")
     operators = _merge_kind_frames(frames_by_kind, "operators")
     liability = _merge_kind_frames(frames_by_kind, "liability")
+    well_licensees = pd.Series(dtype=str)
+    if operators.empty and facilities.empty:
+        well_licensees = wells.get("licensee", pd.Series(dtype=str))
     return pd.DataFrame(
         {
             "name_raw": pd.concat(
                 [
-                    wells.get("licensee", pd.Series(dtype=str)),
+                    well_licensees,
                     facilities.get("facility_operator", pd.Series(dtype=str)),
                     operators.get("ba_name_raw", pd.Series(dtype=str)),
                     operators.get("name_raw", pd.Series(dtype=str)),
@@ -259,24 +413,45 @@ def prepare_operator_dim_inputs(frames_by_kind: dict[str, list[pd.DataFrame]]) -
 
 def prepare_wells_df(frames_by_kind: dict[str, list[pd.DataFrame]], op_map: dict[str, int], as_of: date) -> pd.DataFrame:
     df = _merge_kind_frames(frames_by_kind, "wells")
-    if df.empty:
-        return _empty_df(WELL_DIM_COLUMNS)
+    out = _empty_df(WELL_DIM_COLUMNS)
+    if not df.empty:
+        out["uwi_raw"] = df["uwi"].astype(str)
+        out["well_id"] = out["uwi_raw"].map(normalize_uwi)
+        out["status"] = df.get("status", "UNKNOWN").astype(str)
+        out["licensee_operator_id"] = df.get("licensee", "").astype(str).map(normalize_operator_name).map(op_map)
+        out["lsd"] = df.get("lsd")
+        out["section"] = pd.to_numeric(df.get("section"), errors="coerce")
+        out["township"] = pd.to_numeric(df.get("township"), errors="coerce")
+        out["range"] = pd.to_numeric(df.get("range"), errors="coerce")
+        out["meridian"] = pd.to_numeric(df.get("meridian"), errors="coerce")
+        out["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
+        out["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
+        out["first_seen"] = as_of
+        out["last_seen"] = as_of
+        out["source"] = "aer_st37"
 
-    out = pd.DataFrame()
-    out["uwi_raw"] = df["uwi"].astype(str)
-    out["well_id"] = out["uwi_raw"].map(normalize_uwi)
-    out["status"] = df.get("status", "UNKNOWN").astype(str)
-    out["licensee_operator_id"] = df.get("licensee", "").astype(str).map(normalize_operator_name).map(op_map)
-    out["lsd"] = df.get("lsd")
-    out["section"] = pd.to_numeric(df.get("section"), errors="coerce")
-    out["township"] = pd.to_numeric(df.get("township"), errors="coerce")
-    out["range"] = pd.to_numeric(df.get("range"), errors="coerce")
-    out["meridian"] = pd.to_numeric(df.get("meridian"), errors="coerce")
-    out["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
-    out["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
-    out["first_seen"] = as_of
-    out["last_seen"] = as_of
-    out["source"] = "aer_st37"
+    bridge_raw = _merge_kind_frames(frames_by_kind, "well_facility_bridge")
+    if not bridge_raw.empty and "well_id" in bridge_raw.columns:
+        bridge_well_ids = bridge_raw["well_id"].fillna("").astype(str).map(normalize_uwi)
+        existing_ids = set(out["well_id"].fillna("").astype(str)) if not out.empty else set()
+        supplemental_ids = sorted(well_id for well_id in bridge_well_ids.unique().tolist() if well_id and well_id not in existing_ids)
+        if supplemental_ids:
+            supplemental = _empty_df(WELL_DIM_COLUMNS)
+            supplemental["well_id"] = supplemental_ids
+            supplemental["uwi_raw"] = supplemental_ids
+            supplemental["status"] = "UNKNOWN"
+            supplemental["licensee_operator_id"] = pd.NA
+            supplemental["lsd"] = pd.NA
+            supplemental["section"] = pd.NA
+            supplemental["township"] = pd.NA
+            supplemental["range"] = pd.NA
+            supplemental["meridian"] = pd.NA
+            supplemental["lat"] = pd.NA
+            supplemental["lon"] = pd.NA
+            supplemental["first_seen"] = as_of
+            supplemental["last_seen"] = as_of
+            supplemental["source"] = "petrinex_bridge"
+            out = pd.concat([out, supplemental], ignore_index=True)
     return out
 
 
@@ -297,6 +472,8 @@ def prepare_facilities_df(frames_by_kind: dict[str, list[pd.DataFrame]], operato
     fac_df["lat"] = pd.to_numeric(fac_raw.get("lat"), errors="coerce")
     fac_df["lon"] = pd.to_numeric(fac_raw.get("lon"), errors="coerce")
     fac_df["source"] = "petrinex_facility"
+    fac_df["facility_id"] = fac_df["facility_id"].fillna("").astype(str).str.strip()
+    fac_df = fac_df[fac_df["facility_id"] != ""].drop_duplicates(subset=["facility_id"], keep="last")
     return fac_df
 
 
@@ -305,36 +482,97 @@ def prepare_bridge_df(frames_by_kind: dict[str, list[pd.DataFrame]]) -> pd.DataF
     if bridge_raw.empty:
         return _empty_df(BRIDGE_COLUMNS)
 
+    effective_from_raw = bridge_raw["effective_from"] if "effective_from" in bridge_raw.columns else pd.Series([None] * len(bridge_raw), index=bridge_raw.index)
+    effective_to_raw = bridge_raw["effective_to"] if "effective_to" in bridge_raw.columns else pd.Series([None] * len(bridge_raw), index=bridge_raw.index)
+
     bridge_df = _empty_df(BRIDGE_COLUMNS)
     bridge_df["well_id"] = bridge_raw["well_id"].astype(str).map(normalize_uwi)
     bridge_df["facility_id"] = bridge_raw["facility_id"].astype(str)
-    bridge_df["effective_from"] = pd.to_datetime(bridge_raw.get("effective_from"), errors="coerce").dt.date
-    bridge_df["effective_to"] = pd.to_datetime(bridge_raw.get("effective_to"), errors="coerce").dt.date
+    bridge_df["effective_from"] = pd.to_datetime(effective_from_raw, errors="coerce").dt.date
+    bridge_df["effective_to"] = pd.to_datetime(effective_to_raw, errors="coerce").dt.date
     bridge_df["effective_from"] = bridge_df["effective_from"].map(lambda v: None if pd.isna(v) else v)
     bridge_df["effective_to"] = bridge_df["effective_to"].map(lambda v: None if pd.isna(v) else v)
     bridge_df["source"] = "petrinex_bridge"
+    bridge_df["facility_id"] = bridge_df["facility_id"].fillna("").astype(str).str.strip()
+    bridge_df["well_id"] = bridge_df["well_id"].fillna("").astype(str).str.strip()
+    bridge_df = bridge_df[(bridge_df["facility_id"] != "") & (bridge_df["well_id"] != "")]
     return bridge_df
+
+
+def enrich_wells_with_facility_operator(wells_df: pd.DataFrame, bridge_df: pd.DataFrame, fac_df: pd.DataFrame) -> pd.DataFrame:
+    if wells_df.empty or bridge_df.empty or fac_df.empty or "facility_operator_id" not in fac_df.columns:
+        return wells_df
+
+    facility_ops = fac_df[["facility_id", "facility_operator_id"]].dropna(subset=["facility_operator_id"]).copy()
+    if facility_ops.empty:
+        return wells_df
+
+    well_ops = bridge_df.merge(facility_ops, on="facility_id", how="inner")
+    if well_ops.empty:
+        return wells_df
+
+    well_ops["facility_operator_id"] = pd.to_numeric(well_ops["facility_operator_id"], errors="coerce")
+    well_ops = well_ops.dropna(subset=["facility_operator_id"])
+    if well_ops.empty:
+        return wells_df
+
+    well_ops["facility_operator_id"] = well_ops["facility_operator_id"].astype(int)
+    preferred_ops = (
+        well_ops.groupby(["well_id", "facility_operator_id"]).size().reset_index(name="link_count")
+        .sort_values(["well_id", "link_count"], ascending=[True, False])
+        .drop_duplicates(subset=["well_id"], keep="first")[["well_id", "facility_operator_id"]]
+    )
+
+    enriched = wells_df.merge(preferred_ops, on="well_id", how="left")
+    current_operator = pd.to_numeric(enriched.get("licensee_operator_id"), errors="coerce")
+    enriched["licensee_operator_id"] = current_operator.where(current_operator.notna(), enriched["facility_operator_id"])
+    enriched = enriched.drop(columns=["facility_operator_id"])
+    return enriched
 
 
 def prepare_production_dfs(
     frames_by_kind: dict[str, list[pd.DataFrame]],
     bridge_df: pd.DataFrame,
     wells_df: pd.DataFrame,
+    fac_df: pd.DataFrame,
     start: date,
     end: date,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     fac_prod_raw = _merge_kind_frames(frames_by_kind, "facility_production")
     fac_prod = _empty_df(FACILITY_PROD_COLUMNS)
     if not fac_prod_raw.empty:
-        fac_prod["month"] = month_start(fac_prod_raw["month"]).dt.date
-        fac_prod["facility_id"] = fac_prod_raw["facility_id"].astype(str)
-        fac_prod["oil_bbl"] = pd.to_numeric(fac_prod_raw.get("oil_bbl", 0), errors="coerce").fillna(0.0)
-        fac_prod["gas_mcf"] = pd.to_numeric(fac_prod_raw.get("gas_mcf", 0), errors="coerce").fillna(0.0)
-        fac_prod["water_bbl"] = pd.to_numeric(fac_prod_raw.get("water_bbl", 0), errors="coerce").fillna(0.0)
-        fac_prod["condensate_bbl"] = pd.to_numeric(fac_prod_raw.get("condensate_bbl", 0), errors="coerce").fillna(0.0)
-        fac_prod["source"] = "petrinex_production"
+        fac_working = pd.DataFrame(index=fac_prod_raw.index)
+        empty_series = pd.Series([""] * len(fac_prod_raw), index=fac_prod_raw.index)
+        fac_working["month"] = month_start(fac_prod_raw["month"]).dt.date
+        fac_working["facility_id"] = fac_prod_raw["facility_id"].fillna("").astype(str).str.strip()
+        fac_working["well_id"] = fac_prod_raw.get("well_id", empty_series).fillna("").astype(str).map(normalize_uwi)
+        fac_working["activity_id"] = fac_prod_raw.get("activity_id", empty_series).fillna("").astype(str).str.upper().str.strip()
+        fac_working["oil_bbl"] = pd.to_numeric(fac_prod_raw.get("oil_bbl", 0), errors="coerce").fillna(0.0)
+        fac_working["gas_mcf"] = pd.to_numeric(fac_prod_raw.get("gas_mcf", 0), errors="coerce").fillna(0.0)
+        fac_working["water_bbl"] = pd.to_numeric(fac_prod_raw.get("water_bbl", 0), errors="coerce").fillna(0.0)
+        fac_working["condensate_bbl"] = pd.to_numeric(fac_prod_raw.get("condensate_bbl", 0), errors="coerce").fillna(0.0)
+        fac_working = fac_working[fac_working["facility_id"] != ""]
+        fac_prod = (
+            fac_working.groupby(["month", "facility_id"], as_index=False)[["oil_bbl", "gas_mcf", "water_bbl", "condensate_bbl"]]
+            .sum()
+            .assign(source="petrinex_production")
+        )
+    else:
+        fac_working = pd.DataFrame()
 
-    if fac_prod.empty or bridge_df.empty:
+    direct_well_prod = pd.DataFrame()
+    if not fac_working.empty and "well_id" in fac_working.columns:
+        direct_well_prod = fac_working[fac_working["well_id"] != ""].copy()
+        if not direct_well_prod.empty:
+            direct_well_prod = (
+                direct_well_prod.groupby(["month", "well_id"], as_index=False)[["oil_bbl", "gas_mcf", "water_bbl"]]
+                .sum()
+                .assign(source="petrinex_well_reported", is_estimated=False)
+            )
+
+    if not direct_well_prod.empty:
+        well_prod = direct_well_prod
+    elif fac_prod.empty or bridge_df.empty:
         well_prod = _empty_df(["month", "well_id", "oil_bbl", "gas_mcf", "water_bbl", "source", "is_estimated"])
     else:
         merged = fac_prod.merge(bridge_df[["facility_id", "well_id"]], on="facility_id", how="inner")
@@ -348,14 +586,42 @@ def prepare_production_dfs(
     well_prod = well_prod[well_prod["month"].between(start, end)] if not well_prod.empty else well_prod
 
     status_df = _empty_df(WELL_STATUS_COLUMNS)
+    status_frames: list[pd.DataFrame] = []
     if not wells_df.empty:
-        status_df["well_id"] = wells_df["well_id"]
-        status_df["status"] = wells_df["status"]
-        status_df["status_date"] = None
-        status_df["source"] = "aer_st37"
+        st37_status = _empty_df(WELL_STATUS_COLUMNS)
+        st37_status["well_id"] = wells_df["well_id"]
+        st37_status["status"] = wells_df["status"]
+        st37_status["status_date"] = None
+        st37_status["source"] = "aer_st37"
+        status_frames.append(st37_status)
+
+    if not fac_working.empty and {"well_id", "activity_id", "month"}.issubset(fac_working.columns):
+        activity_statuses = {"SHUTIN": "SHUT-IN", "SUSPENDED": "SUSPENDED", "INACTIVE": "INACTIVE"}
+        petr_status = fac_working[fac_working["well_id"] != ""].copy()
+        petr_status = petr_status[petr_status["activity_id"].isin(activity_statuses)]
+        if not petr_status.empty:
+            petr_status = petr_status[["well_id", "activity_id", "month"]].drop_duplicates()
+            petr_status = petr_status.rename(columns={"month": "status_date"})
+            petr_status["status"] = petr_status["activity_id"].map(activity_statuses)
+            petr_status["source"] = "petrinex_monthly_activity"
+            petr_status = petr_status[["well_id", "status", "status_date", "source"]]
+            status_frames.append(petr_status)
+
+    if status_frames:
+        status_df = pd.concat(status_frames, ignore_index=True)
 
     op_prod = _empty_df(OPERATOR_PROD_COLUMNS)
-    if not well_prod.empty and not wells_df.empty:
+    if not fac_prod.empty and not fac_df.empty and "facility_operator_id" in fac_df.columns:
+        f2op = fac_df[["facility_id", "facility_operator_id"]].rename(columns={"facility_operator_id": "operator_id"})
+        op_prod = fac_prod.merge(f2op, on="facility_id", how="left")
+        op_prod = op_prod.dropna(subset=["operator_id"])
+        op_prod["operator_id"] = op_prod["operator_id"].astype(int)
+        op_prod = (
+            op_prod.groupby(["month", "operator_id"], as_index=False)[["oil_bbl", "gas_mcf", "water_bbl"]]
+            .sum()
+            .assign(basis_level="facility_reported", source="petrinex_facility_reported")
+        )
+    elif not well_prod.empty and not wells_df.empty:
         w2op = wells_df[["well_id", "licensee_operator_id"]].rename(columns={"licensee_operator_id": "operator_id"})
         op_prod = well_prod.merge(w2op, on="well_id", how="left")
         op_prod = op_prod.dropna(subset=["operator_id"])
@@ -398,12 +664,35 @@ def build_operator_metrics(op_prod: pd.DataFrame, liability_df: pd.DataFrame, re
     return compute_operator_metrics(op_prod, liability_df, restart_df, wells_df, as_of_date)
 
 
+def run_source_diagnostics(args) -> tuple[int, dict[str, Any]]:
+    LOGGER.info("Running source diagnostics")
+    _, _, sources_failed, row_counts, source_summaries = prepare_source_frames(args)
+    required_failures = sum(
+        1
+        for item in source_summaries
+        if bool(item.get("required_for_live")) and str(item.get("load_status", "")).lower() != "success"
+    )
+    optional_failures = sum(
+        1
+        for item in source_summaries
+        if not bool(item.get("required_for_live")) and str(item.get("load_status", "")).lower() != "success"
+    )
+    report = {
+        "required_failures": required_failures,
+        "optional_failures": optional_failures,
+        "sources_failed": sources_failed,
+        "row_counts": row_counts,
+        "source_summaries": source_summaries,
+    }
+    return (0 if required_failures == 0 else 1), report
+
+
 def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
     LOGGER.info("Starting ingestion run")
     ensure_database_dir()
-    end = _parse_date(args.end, date.today())
+    end = _parse_date(args.end, _default_live_end_date())
     start = _parse_date(args.start, end - timedelta(days=365))
-    started_at = datetime.utcnow()
+    started_at = datetime.now(timezone.utc)
     run_id = new_run_id()
 
     LOGGER.info("Loading configuration from %s", args.config)
@@ -411,6 +700,8 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
 
     try:
         upgrade_to_head()
+        if row_counts["validation"]["errors"]:
+            raise ValueError("Required live sources failed: " + "; ".join(row_counts["validation"]["errors"]))
         engine = get_engine(get_database_url())
         with engine.begin() as conn:
             with _phase("Preparing operator source inputs", lambda: len(operator_inputs)):
@@ -436,6 +727,15 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
             with _phase("Preparing wells dataframe", lambda: len(wells_df)):
                 wells_df = prepare_wells_df(frames_by_kind, operator_map, end)
 
+            with _phase("Preparing facilities dataframe", lambda: len(fac_df)):
+                fac_df = prepare_facilities_df(frames_by_kind, operator_map)
+            with _phase("Upserting dim_facility", lambda: row_counts["loaded"].get("dim_facility", 0)):
+                row_counts["loaded"]["dim_facility"] = upsert_dim_facility(conn, fac_df)
+
+            with _phase("Preparing bridge dataframe", lambda: len(bridge_df)):
+                bridge_df = prepare_bridge_df(frames_by_kind)
+            with _phase("Enriching wells with facility operators", lambda: len(wells_df)):
+                wells_df = enrich_wells_with_facility_operator(wells_df, bridge_df, fac_df)
             with _phase("Deduplicating wells dataframe", lambda: len(deduped_wells_preview)):
                 deduped_wells_preview = _dedupe_wells_df(wells_df) if not wells_df.empty else wells_df
 
@@ -446,19 +746,48 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
             )
             with _phase("Upserting dim_well", lambda: row_counts["loaded"].get("dim_well", 0)):
                 row_counts["loaded"]["dim_well"] = upsert_dim_well(conn, wells_df)
-
-            with _phase("Preparing facilities dataframe", lambda: len(fac_df)):
-                fac_df = prepare_facilities_df(frames_by_kind, operator_map)
-            with _phase("Upserting dim_facility", lambda: row_counts["loaded"].get("dim_facility", 0)):
-                row_counts["loaded"]["dim_facility"] = upsert_dim_facility(conn, fac_df)
-
-            with _phase("Preparing bridge dataframe", lambda: len(bridge_df)):
-                bridge_df = prepare_bridge_df(frames_by_kind)
             with _phase("Loading bridge_well_facility", lambda: row_counts["loaded"].get("bridge_well_facility", 0)):
                 row_counts["loaded"]["bridge_well_facility"] = load_bridge_well_facility(conn, bridge_df)
 
             with _phase("Preparing facility production dataframe", lambda: len(fac_prod)):
-                fac_prod, well_prod, status_df, op_prod = prepare_production_dfs(frames_by_kind, bridge_df, wells_df, start, end)
+                fac_prod, well_prod, status_df, op_prod = prepare_production_dfs(frames_by_kind, bridge_df, wells_df, fac_df, start, end)
+                if not well_prod.empty:
+                    existing_well_ids = set(wells_df["well_id"].fillna("").astype(str)) if not wells_df.empty else set()
+                    missing_well_ids = sorted(
+                        well_id
+                        for well_id in well_prod["well_id"].fillna("").astype(str).unique().tolist()
+                        if well_id and well_id not in existing_well_ids
+                    )
+                    if missing_well_ids:
+                        supplemental = _empty_df(WELL_DIM_COLUMNS)
+                        supplemental["well_id"] = missing_well_ids
+                        supplemental["uwi_raw"] = missing_well_ids
+                        supplemental["status"] = "UNKNOWN"
+                        supplemental["licensee_operator_id"] = pd.NA
+                        supplemental["lsd"] = pd.NA
+                        supplemental["section"] = pd.NA
+                        supplemental["township"] = pd.NA
+                        supplemental["range"] = pd.NA
+                        supplemental["meridian"] = pd.NA
+                        supplemental["lat"] = pd.NA
+                        supplemental["lon"] = pd.NA
+                        supplemental["first_seen"] = end
+                        supplemental["last_seen"] = end
+                        supplemental["source"] = "petrinex_production"
+                        wells_df = pd.concat([wells_df, supplemental], ignore_index=True)
+                if not status_df.empty and not wells_df.empty:
+                    latest_status = status_df[status_df["status"].fillna("").astype(str).str.strip() != ""].copy()
+                    latest_status = latest_status[latest_status["status"].astype(str).str.upper() != "UNKNOWN"]
+                    if not latest_status.empty:
+                        latest_status["status_rank"] = latest_status["source"].eq("petrinex_monthly_activity").astype(int)
+                        latest_status["status_date"] = pd.to_datetime(latest_status["status_date"], errors="coerce")
+                        latest_status = (
+                            latest_status.sort_values(["status_rank", "status_date"], ascending=[False, False])
+                            .drop_duplicates(subset=["well_id"], keep="first")[["well_id", "status"]]
+                        )
+                        wells_df = wells_df.drop(columns=["status"]).merge(latest_status, on="well_id", how="left")
+                        wells_df["status"] = wells_df["status"].fillna("UNKNOWN")
+                row_counts["loaded"]["dim_well"] = upsert_dim_well(conn, wells_df)
             with _phase("Loading fact_facility_production_monthly", lambda: row_counts["loaded"].get("fact_facility_production_monthly", 0)):
                 row_counts["loaded"]["fact_facility_production_monthly"] = replace_fact_by_month_range(
                     conn, FactFacilityProductionMonthly, fac_prod, "petrinex_production", start, end
@@ -480,7 +809,7 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
                 op_prod_load_df = op_prod
             with _phase("Loading fact_operator_production_monthly", lambda: row_counts["loaded"].get("fact_operator_production_monthly", 0)):
                 row_counts["loaded"]["fact_operator_production_monthly"] = replace_fact_operator_prod(
-                    conn, op_prod_load_df, "derived_well_estimated", start, end
+                    conn, op_prod_load_df, "petrinex_facility_reported", start, end
                 )
 
             with _phase("Preparing liability dataframe", lambda: len(liability_df)):
@@ -512,17 +841,24 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
             with _phase("Loading fact_operator_metrics", lambda: row_counts["loaded"].get("fact_operator_metrics", 0)):
                 row_counts["loaded"]["fact_operator_metrics"] = replace_fact_metrics(conn, metrics_df, end)
 
+            with _phase("Validating curated database"):
+                row_counts["validation"]["database"] = _collect_database_validation(conn)
+                if row_counts["validation"]["database"]["errors"]:
+                    raise ValueError(
+                        "Database validation failed: " + "; ".join(row_counts["validation"]["database"]["errors"])
+                    )
+
             with _phase("Recording ingestion_run", lambda: 1):
                 record_ingestion_run(
                     conn,
                     run_id=run_id,
                     started_at=started_at,
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc),
                     status="success",
                     sources_ok=sources_ok,
                     sources_failed=sources_failed,
                     row_counts=row_counts,
-                    notes="Resilient ingestion run completed",
+                    notes="Ingestion run completed with source diagnostics and database validation",
                 )
 
             top_prod = pd.DataFrame()
@@ -543,7 +879,7 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
                 conn,
                 run_id=run_id,
                 started_at=started_at,
-                finished_at=datetime.utcnow(),
+                finished_at=datetime.now(timezone.utc),
                 status="failed",
                 sources_ok=sources_ok,
                 sources_failed={**sources_failed, "pipeline": str(exc)},

@@ -6,15 +6,70 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from deal_flow_ingest.config import get_database_url
 from deal_flow_ingest.db.schema import DimWell, FactOperatorMetrics, FactWellProductionMonthly, FactWellRestartScore, get_engine
-from deal_flow_ingest.services.pipeline import ensure_database_dir, reset_database as reset_database_service, run_ingestion_pipeline
+from deal_flow_ingest.services.pipeline import (
+    ensure_database_dir,
+    reset_database as reset_database_service,
+    run_ingestion_pipeline,
+    run_source_diagnostics,
+)
 from deal_flow_ingest.transform.opportunities import compute_well_opportunities
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def get_seller_theses_frame(args: argparse.Namespace) -> pd.DataFrame:
+    ensure_database_dir()
+    engine = get_engine(get_database_url())
+    with engine.connect() as conn:
+        theses = pd.read_sql(text("select * from seller_theses"), conn)
+
+    if theses.empty:
+        return theses
+
+    theses["thesis_score"] = pd.to_numeric(theses["thesis_score"], errors="coerce").fillna(0.0)
+    theses["avg_oil_bpd_30d"] = pd.to_numeric(theses.get("avg_oil_bpd_30d", 0), errors="coerce").fillna(0.0)
+    theses["avg_oil_bpd_365d"] = pd.to_numeric(theses.get("avg_oil_bpd_365d", 0), errors="coerce").fillna(0.0)
+    theses["seller_score"] = pd.to_numeric(theses.get("seller_score", 0), errors="coerce").fillna(0.0)
+    theses["opportunity_score"] = pd.to_numeric(theses.get("opportunity_score", 0), errors="coerce").fillna(0.0)
+    sort_by = getattr(args, "sort_by", "thesis_score")
+    ascending = bool(getattr(args, "ascending", False))
+    max_avg_oil_bpd_30d = getattr(args, "max_avg_oil_bpd_30d", None)
+
+    theses = theses[theses["thesis_score"] >= args.min_score]
+    if max_avg_oil_bpd_30d is not None:
+        theses = theses[theses["avg_oil_bpd_30d"] <= float(max_avg_oil_bpd_30d)]
+
+    sort_columns = [sort_by]
+    ascending_values = [ascending]
+    if sort_by != "thesis_score":
+        sort_columns.append("thesis_score")
+        ascending_values.append(False)
+    if sort_by != "seller_score":
+        sort_columns.append("seller_score")
+        ascending_values.append(False)
+    return theses.sort_values(sort_columns, ascending=ascending_values).head(args.limit)
+
+
+def get_package_candidates_frame(args: argparse.Namespace) -> pd.DataFrame:
+    ensure_database_dir()
+    engine = get_engine(get_database_url())
+    with engine.connect() as conn:
+        packages = pd.read_sql(text("select * from package_candidates"), conn)
+
+    if packages.empty:
+        return packages
+
+    packages["package_score"] = pd.to_numeric(packages["package_score"], errors="coerce").fillna(0.0)
+    packages = packages[packages["package_score"] >= args.min_score]
+    return packages.sort_values(
+        ["package_score", "estimated_restart_upside_bpd", "high_priority_well_count"],
+        ascending=False,
+    ).head(args.limit)
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,10 +81,22 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--refresh", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    check = sub.add_parser("check-sources")
+    check.add_argument("--refresh", action="store_true")
+    check.add_argument("--dry-run", action="store_true")
+    check.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
     export = sub.add_parser("export-opportunities")
     export.add_argument("--min-score", type=float, default=30.0)
     export.add_argument("--limit", type=int, default=250)
     export.add_argument("--output", type=str, default="data/exports/well_opportunities.csv")
+    seller = sub.add_parser("export-seller-theses")
+    seller.add_argument("--min-score", type=float, default=0.0)
+    seller.add_argument("--limit", type=int, default=250)
+    seller.add_argument("--output", type=str, default="data/exports/seller_theses.csv")
+    packages = sub.add_parser("export-package-candidates")
+    packages.add_argument("--min-score", type=float, default=0.0)
+    packages.add_argument("--limit", type=int, default=250)
+    packages.add_argument("--output", type=str, default="data/exports/package_candidates.csv")
     sub.add_parser("apply_saved_sql")
     reset = sub.add_parser("reset")
     reset.add_argument("--force", action="store_true")
@@ -72,6 +139,21 @@ def run_ingestion(args: argparse.Namespace) -> int:
     for item in result.source_summaries:
         print(
             f"- {item['source']}: artifact_downloaded={item['artifact_downloaded']} rows={item['rows_parsed']} load={item['load_status']}"
+        )
+    return status
+
+
+def check_sources(args: argparse.Namespace) -> int:
+    status, report = run_source_diagnostics(args)
+    print(f"source diagnostics status: {'ok' if status == 0 else 'failed'}")
+    print(f"required failures: {report['required_failures']}")
+    print(f"optional failures: {report['optional_failures']}")
+    print("source summary")
+    for item in report["source_summaries"]:
+        location = item.get("artifact_url") or item.get("sample_file") or "n/a"
+        print(
+            f"- {item['source']}: maturity={item['maturity']} required_for_live={item['required_for_live']} "
+            f"rows={item['rows_parsed']} status={item['load_status']} location={location}"
         )
     return status
 
@@ -121,13 +203,72 @@ def export_opportunities(args: argparse.Namespace) -> int:
     return 0
 
 
+def export_seller_theses(args: argparse.Namespace) -> int:
+    theses = get_seller_theses_frame(args)
+    if theses.empty:
+        print("no seller theses found; run apply_saved_sql after ingestion")
+        return 1
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    theses.to_csv(output_path, index=False)
+
+    cols = [
+        "operator",
+        "avg_oil_bpd_30d",
+        "avg_oil_bpd_365d",
+        "thesis_priority",
+        "thesis_score",
+        "seller_score",
+        "opportunity_score",
+        "footprint_type",
+        "core_area_key",
+        "package_count",
+    ]
+    print(f"exported {len(theses)} seller theses to {output_path}")
+    print("top 20 seller theses")
+    print(theses[cols].head(20).to_string(index=False) if not theses.empty else "none")
+    return 0
+
+
+def export_package_candidates(args: argparse.Namespace) -> int:
+    packages = get_package_candidates_frame(args)
+    if packages.empty:
+        print("no package candidates found; run apply_saved_sql after ingestion")
+        return 1
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    packages.to_csv(output_path, index=False)
+
+    cols = [
+        "operator",
+        "area_key",
+        "suspended_well_count",
+        "high_priority_well_count",
+        "linked_facility_count",
+        "estimated_restart_upside_bpd",
+        "package_score",
+    ]
+    print(f"exported {len(packages)} package candidates to {output_path}")
+    print("top 20 package candidates")
+    print(packages[cols].head(20).to_string(index=False) if not packages.empty else "none")
+    return 0
+
+
 def main() -> int:
     _configure_logging()
     args = parse_args()
     if args.command == "run":
         return run_ingestion(args)
+    if args.command == "check-sources":
+        return check_sources(args)
     if args.command == "export-opportunities":
         return export_opportunities(args)
+    if args.command == "export-seller-theses":
+        return export_seller_theses(args)
+    if args.command == "export-package-candidates":
+        return export_package_candidates(args)
     if args.command == "apply_saved_sql":
         from deal_flow_ingest.apply_saved_sql import apply_saved_sql
 
