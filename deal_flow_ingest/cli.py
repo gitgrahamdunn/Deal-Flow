@@ -1,6 +1,7 @@
 """Compatibility wrapper to support `python -m deal_flow_ingest.cli` from repo root."""
 
 from .deal_flow_ingest.cli import (
+    _read_curated_frame,
     check_sources,
     export_opportunities,
     export_package_candidates,
@@ -14,6 +15,7 @@ from .deal_flow_ingest.cli import (
 
 __all__ = [
     "main",
+    "_read_curated_frame",
     "run_ingestion",
     "check_sources",
     "export_opportunities",

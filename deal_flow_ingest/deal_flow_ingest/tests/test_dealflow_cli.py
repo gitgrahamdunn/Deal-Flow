@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+
 from deal_flow_ingest import dealflow
+from deal_flow_ingest.config import get_default_config_path
 
 
 def test_dealflow_top50_dispatches_with_limit_50(monkeypatch):
@@ -161,10 +164,84 @@ def test_dealflow_app_dispatches(monkeypatch):
     monkeypatch.setattr(
         dealflow,
         "parse_args",
-        lambda: dealflow.argparse.Namespace(command="app", port=8765),
+        lambda: dealflow.argparse.Namespace(command="app", port=8765, host="0.0.0.0"),
     )
     monkeypatch.setattr(dealflow, "_configure_logging", lambda: None)
-    monkeypatch.setattr(dealflow, "launch_app", lambda port: called.__setitem__("port", port) or 0)
+    monkeypatch.setattr(
+        dealflow,
+        "launch_app",
+        lambda port, host: called.update({"port": port, "host": host}) or 0,
+    )
 
     assert dealflow.main() == 0
-    assert called == {"port": 8765}
+    assert called == {"port": 8765, "host": "0.0.0.0"}
+
+
+def test_parse_args_uses_package_default_config(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["dealflow", "ingest"])
+
+    args = dealflow.parse_args()
+
+    assert args.config == get_default_config_path()
+
+
+def test_launch_app_reuses_existing_port(monkeypatch, capsys):
+    monkeypatch.setattr(dealflow, "_is_port_open", lambda host, port: True)
+
+    called = {"subprocess": 0}
+    monkeypatch.setattr(dealflow.subprocess, "call", lambda cmd: called.__setitem__("subprocess", called["subprocess"] + 1) or 0)
+
+    assert dealflow.launch_app(8443, "127.0.0.1") == 0
+    assert called["subprocess"] == 0
+    assert "GUI already running at http://127.0.0.1:8443" in capsys.readouterr().out
+
+
+def test_launch_app_probes_loopback_for_wildcard_host(monkeypatch, capsys):
+    called = {"probe": None, "subprocess": 0}
+
+    monkeypatch.setattr(
+        dealflow,
+        "_is_port_open",
+        lambda host, port: called.__setitem__("probe", (host, port)) or True,
+    )
+    monkeypatch.setattr(
+        dealflow.subprocess,
+        "call",
+        lambda cmd: called.__setitem__("subprocess", called["subprocess"] + 1) or 0,
+    )
+
+    assert dealflow.launch_app(8443, "0.0.0.0") == 0
+    assert called["probe"] == ("127.0.0.1", 8443)
+    assert called["subprocess"] == 0
+    assert "GUI already running at http://0.0.0.0:8443" in capsys.readouterr().out
+
+
+def test_dealflow_funnel_dispatches(monkeypatch):
+    called = {}
+
+    monkeypatch.setattr(
+        dealflow,
+        "parse_args",
+        lambda: dealflow.argparse.Namespace(
+            command="funnel",
+            port=8502,
+            https_port=8443,
+            bg=True,
+            yes=True,
+            status=False,
+            reset=False,
+        ),
+    )
+    monkeypatch.setattr(dealflow, "_configure_logging", lambda: None)
+    monkeypatch.setattr(dealflow, "run_funnel", lambda args: called.update(vars(args)) or 0)
+
+    assert dealflow.main() == 0
+    assert called == {
+        "command": "funnel",
+        "port": 8502,
+        "https_port": 8443,
+        "bg": True,
+        "yes": True,
+        "status": False,
+        "reset": False,
+    }

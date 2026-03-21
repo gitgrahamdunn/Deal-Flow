@@ -62,6 +62,10 @@ DATASET_KIND_MAP = {
 }
 
 
+def get_default_config_path() -> str:
+    return str(Path(__file__).resolve().parent / "configs" / "sources.yaml")
+
+
 def load_config(config_path: str | Path) -> AppConfig:
     with open(config_path, "r", encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}

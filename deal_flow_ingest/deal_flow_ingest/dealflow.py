@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import subprocess
 import shutil
+import socket
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from deal_flow_ingest.cli import (
     reset_database,
     run_ingestion,
 )
+from deal_flow_ingest.config import get_default_config_path
 
 
 def _configure_logging() -> None:
@@ -30,6 +32,7 @@ def _configure_logging() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="dealflow", description="Operator-facing Deal Flow CLI")
     sub = parser.add_subparsers(dest="command", required=True)
+    default_config_path = get_default_config_path()
 
     ingest = sub.add_parser("ingest", help="Refresh the warehouse and rebuild curated SQL views")
     ingest.add_argument("--start", type=str)
@@ -37,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     ingest.add_argument("--refresh", action="store_true")
     ingest.add_argument("--dry-run", action="store_true")
     ingest.add_argument("--skip-sql", action="store_true")
-    ingest.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    ingest.add_argument("--config", default=default_config_path)
 
     refresh = sub.add_parser("refresh", help="Alias for ingest")
     refresh.add_argument("--start", type=str)
@@ -45,17 +48,17 @@ def parse_args() -> argparse.Namespace:
     refresh.add_argument("--refresh", action="store_true")
     refresh.add_argument("--dry-run", action="store_true")
     refresh.add_argument("--skip-sql", action="store_true")
-    refresh.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    refresh.add_argument("--config", default=default_config_path)
 
     sources = sub.add_parser("sources", help="Check source availability")
     sources.add_argument("--refresh", action="store_true")
     sources.add_argument("--dry-run", action="store_true")
-    sources.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    sources.add_argument("--config", default=default_config_path)
 
     doctor = sub.add_parser("doctor", help="Alias for sources")
     doctor.add_argument("--refresh", action="store_true")
     doctor.add_argument("--dry-run", action="store_true")
-    doctor.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    doctor.add_argument("--config", default=default_config_path)
 
     top50 = sub.add_parser("top50", help="Export the top 50 seller theses")
     top50.add_argument("--min-score", type=float, default=0.0)
@@ -86,9 +89,18 @@ def parse_args() -> argparse.Namespace:
 
     sub.add_parser("ui", help="Interactive export helper")
     app = sub.add_parser("app", help="Launch the local web GUI")
-    app.add_argument("--port", type=int, default=8501)
+    app.add_argument("--port", type=int, default=8443)
+    app.add_argument("--host", type=str, default="127.0.0.1")
     gui = sub.add_parser("gui", help="Alias for app")
-    gui.add_argument("--port", type=int, default=8501)
+    gui.add_argument("--port", type=int, default=8443)
+    gui.add_argument("--host", type=str, default="127.0.0.1")
+    funnel = sub.add_parser("funnel", help="Expose the GUI through Tailscale Funnel")
+    funnel.add_argument("--port", type=int, default=8443)
+    funnel.add_argument("--https-port", type=int, default=8443)
+    funnel.add_argument("--bg", action="store_true")
+    funnel.add_argument("--yes", action="store_true")
+    funnel.add_argument("--status", action="store_true")
+    funnel.add_argument("--reset", action="store_true")
 
     build_sql = sub.add_parser("build-sql", help="Rebuild curated SQL views")
 
@@ -174,7 +186,10 @@ def main() -> int:
         return run_ui()
 
     if args.command in {"app", "gui"}:
-        return launch_app(args.port)
+        return launch_app(args.port, args.host)
+
+    if args.command == "funnel":
+        return run_funnel(args)
 
     if args.command == "build-sql":
         return apply_saved_sql()
@@ -315,7 +330,7 @@ def run_ui() -> int:
                     end=end or None,
                     refresh=False,
                     dry_run=False,
-                    config="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml",
+                    config=get_default_config_path(),
                 )
             )
             if status == 0:
@@ -329,7 +344,7 @@ def run_ui() -> int:
                 SimpleNamespace(
                     refresh=False,
                     dry_run=False,
-                    config="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml",
+                    config=get_default_config_path(),
                 )
             )
             input("Press Enter to continue...")
@@ -403,7 +418,12 @@ def run_ui() -> int:
             continue
 
 
-def launch_app(port: int) -> int:
+def launch_app(port: int, host: str = "127.0.0.1") -> int:
+    probe_host = _app_probe_host(host)
+    if _is_port_open(probe_host, port):
+        print(f"GUI already running at http://{host}:{port}")
+        return 0
+
     app_path = Path(__file__).resolve().parent / "app.py"
     cmd = [
         sys.executable,
@@ -411,8 +431,45 @@ def launch_app(port: int) -> int:
         "streamlit",
         "run",
         str(app_path),
+        "--server.address",
+        str(host),
         "--server.port",
         str(port),
+        "--server.headless",
+        "true",
     ]
-    print(f"Launching GUI at http://localhost:{port}")
+    print(f"Launching GUI at http://{host}:{port}")
+    return subprocess.call(cmd)
+
+
+def _is_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _app_probe_host(host: str) -> str:
+    if host in {"0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+def run_funnel(args: argparse.Namespace) -> int:
+    if args.status:
+        return subprocess.call(["tailscale", "funnel", "status"])
+    if args.reset:
+        return subprocess.call(["tailscale", "funnel", "reset"])
+
+    cmd = ["tailscale", "funnel", f"--https={args.https_port}"]
+    if args.bg:
+        cmd.append("--bg")
+    if args.yes:
+        cmd.append("--yes")
+    cmd.append(f"http://127.0.0.1:{args.port}")
+    print(
+        f"Exposing Deal Flow GUI through Tailscale Funnel at external port {args.https_port} "
+        f"to local port {args.port}"
+    )
     return subprocess.call(cmd)

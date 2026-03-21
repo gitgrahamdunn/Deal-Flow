@@ -41,6 +41,7 @@ dealflow build-sql
 dealflow ui
 dealflow app
 dealflow gui
+dealflow funnel --status
 dealflow top50
 dealflow top100
 dealflow lowprod --limit 100 --max-prod 15
@@ -67,6 +68,9 @@ GUI usage:
 ```bash
 dealflow app
 dealflow app --port 8502
+dealflow app --host 0.0.0.0 --port 8443
+dealflow funnel --port 8443 --https-port 8443 --bg --yes
+dealflow funnel --status
 ```
 
 This launches a local Streamlit app with:
@@ -75,7 +79,17 @@ This launches a local Streamlit app with:
 - low-production target screening
 - package candidates
 - operator drilldown
+- thesis detail view
 - in-app refresh controls
+
+Remote access with Tailscale Funnel:
+
+```bash
+dealflow app
+dealflow funnel --bg --yes
+```
+
+Then open the Funnel URL reported by `dealflow funnel --status`.
 
 ## Recommended live workflow
 

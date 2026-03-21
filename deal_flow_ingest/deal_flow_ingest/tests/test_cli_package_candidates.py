@@ -3,6 +3,7 @@ from pathlib import Path
 
 from deal_flow_ingest.apply_saved_sql import apply_saved_sql
 from deal_flow_ingest.cli import export_package_candidates, run_ingestion
+from deal_flow_ingest.config import get_default_config_path
 
 
 def test_export_package_candidates_writes_csv(tmp_path: Path, monkeypatch):
@@ -15,7 +16,7 @@ def test_export_package_candidates_writes_csv(tmp_path: Path, monkeypatch):
         end="2025-03-31",
         refresh=False,
         dry_run=True,
-        config="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml",
+        config=get_default_config_path(),
     )
     assert run_ingestion(run_args) == 0
     assert apply_saved_sql() == 0

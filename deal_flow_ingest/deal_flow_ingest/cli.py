@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 
-from deal_flow_ingest.config import get_database_url
+from deal_flow_ingest.config import get_database_url, get_default_config_path
 from deal_flow_ingest.db.schema import DimWell, FactOperatorMetrics, FactWellProductionMonthly, FactWellRestartScore, get_engine
 from deal_flow_ingest.services.pipeline import (
     ensure_database_dir,
@@ -22,11 +23,30 @@ from deal_flow_ingest.transform.opportunities import compute_well_opportunities
 LOGGER = logging.getLogger(__name__)
 
 
-def get_seller_theses_frame(args: argparse.Namespace) -> pd.DataFrame:
+def _is_missing_sqlite_object_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "no such table:" in message or "no such view:" in message
+
+
+def _read_curated_frame(sql: str, params: dict[str, object] | None = None) -> pd.DataFrame:
     ensure_database_dir()
     engine = get_engine(get_database_url())
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text(sql), conn, params=params)
+    except OperationalError as exc:
+        if not _is_missing_sqlite_object_error(exc):
+            raise
+
+    from deal_flow_ingest.apply_saved_sql import apply_saved_sql
+
+    apply_saved_sql()
     with engine.connect() as conn:
-        theses = pd.read_sql(text("select * from seller_theses"), conn)
+        return pd.read_sql(text(sql), conn, params=params)
+
+
+def get_seller_theses_frame(args: argparse.Namespace) -> pd.DataFrame:
+    theses = _read_curated_frame("select * from seller_theses")
 
     if theses.empty:
         return theses
@@ -56,10 +76,7 @@ def get_seller_theses_frame(args: argparse.Namespace) -> pd.DataFrame:
 
 
 def get_package_candidates_frame(args: argparse.Namespace) -> pd.DataFrame:
-    ensure_database_dir()
-    engine = get_engine(get_database_url())
-    with engine.connect() as conn:
-        packages = pd.read_sql(text("select * from package_candidates"), conn)
+    packages = _read_curated_frame("select * from package_candidates")
 
     if packages.empty:
         return packages
@@ -75,16 +92,17 @@ def get_package_candidates_frame(args: argparse.Namespace) -> pd.DataFrame:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="deal_flow_ingest", description="Run Deal Flow ingestion pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
+    default_config_path = get_default_config_path()
     run = sub.add_parser("run")
     run.add_argument("--start", type=str)
     run.add_argument("--end", type=str)
     run.add_argument("--refresh", action="store_true")
     run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    run.add_argument("--config", default=default_config_path)
     check = sub.add_parser("check-sources")
     check.add_argument("--refresh", action="store_true")
     check.add_argument("--dry-run", action="store_true")
-    check.add_argument("--config", default="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml")
+    check.add_argument("--config", default=default_config_path)
     export = sub.add_parser("export-opportunities")
     export.add_argument("--min-score", type=float, default=30.0)
     export.add_argument("--limit", type=int, default=250)

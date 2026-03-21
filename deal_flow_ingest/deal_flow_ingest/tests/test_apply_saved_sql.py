@@ -5,6 +5,7 @@ from pathlib import Path
 
 from deal_flow_ingest.apply_saved_sql import apply_saved_sql
 from deal_flow_ingest.cli import run_ingestion
+from deal_flow_ingest.config import get_default_config_path
 
 
 def _fetch_one(db_path: Path, query: str):
@@ -24,7 +25,7 @@ def test_apply_saved_sql_builds_curated_views(tmp_path: Path):
         end="2025-03-31",
         refresh=False,
         dry_run=True,
-        config="deal_flow_ingest/deal_flow_ingest/configs/sources.yaml",
+        config=get_default_config_path(),
     )
 
     assert run_ingestion(args) == 0
