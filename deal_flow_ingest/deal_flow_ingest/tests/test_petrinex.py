@@ -7,6 +7,8 @@ from deal_flow_ingest.sources.petrinex import (
     load_business_associate,
     load_facility_master,
     load_monthly_production,
+    load_well_infrastructure,
+    load_well_licence,
     load_well_facility_bridge,
 )
 
@@ -22,6 +24,8 @@ def test_discover_petrinex_artifact_urls() -> None:
     assert discovered == {
         "facility_master": "https://www.petrinex.ca/files/Petrinex_Facility_Master_2024.csv",
         "monthly_production": "https://www.petrinex.ca/files/Petrinex_Facility_Production_2024.xlsx",
+        "well_infrastructure": "https://www.petrinex.ca/files/Petrinex_Well_Infrastructure_2024.csv",
+        "well_licence": "https://www.petrinex.ca/files/Petrinex_Well_Licence_2024.csv",
         "well_facility_bridge": "https://www.petrinex.ca/files/Petrinex_Well-Facility_Bridge_2024.csv",
         "business_associate": "https://www.petrinex.ca/files/Petrinex_Business_Associate_2024.csv",
     }
@@ -45,6 +49,34 @@ def test_parse_well_facility_bridge() -> None:
 
     assert parsed.iloc[0]["well_id"] == 1000111222333444
     assert parsed.iloc[0]["facility_id"] == "ABCF001"
+
+
+def test_parse_well_infrastructure() -> None:
+    source = pd.read_csv(FIXTURE_DIR / "well_infrastructure.csv")
+
+    parsed = load_well_infrastructure(source)
+
+    assert parsed.iloc[0]["uwi"] == "100011100100W400"
+    assert parsed.iloc[0]["license_number"] == 482521
+    assert parsed.iloc[0]["licensee"] == "Alpha Energy Ltd."
+    assert parsed.iloc[0]["status"] == "SUSPENDED"
+    assert parsed.iloc[0]["lsd"] == 10
+    assert parsed.iloc[0]["section"] == 1
+    assert parsed.iloc[0]["spud_date"] == "2021-03-15"
+
+
+def test_parse_well_licence() -> None:
+    source = pd.read_csv(FIXTURE_DIR / "well_licence.csv")
+
+    parsed = load_well_licence(source)
+
+    assert parsed.iloc[0]["uwi"] == ""
+    assert parsed.iloc[0]["license_number"] == 482523
+    assert parsed.iloc[0]["licensee"] == "Beta Petroleum Inc"
+    assert parsed.iloc[0]["status"] == "SHUT-IN"
+    assert parsed.iloc[0]["well_name"] == "03-03-051-09W4"
+    assert parsed.iloc[0]["lsd"] == 12
+    assert parsed.iloc[0]["township"] == 51
 
 
 def test_parse_monthly_production() -> None:

@@ -141,6 +141,30 @@ sources:
     file_type: zip
     refresh_frequency: monthly
 
+  petrinex_public_well_infrastructure:
+    enabled: true
+    source_name: petrinex_well_infrastructure
+    maturity: live_beta
+    required_for_live: false
+    local_sample: well_infrastructure_sample.csv
+    parser_name: petrinex_public
+    landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
+    dataset_url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20Infrastructure/CSV"
+    file_type: zip
+    refresh_frequency: nightly
+
+  petrinex_public_well_licence:
+    enabled: true
+    source_name: petrinex_well_licence
+    maturity: live_beta
+    required_for_live: false
+    local_sample: well_licence_sample.csv
+    parser_name: petrinex_public
+    landing_page_url: "https://www.petrinex.ca/PD/Pages/APD.aspx"
+    dataset_url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20Licence/CSV"
+    file_type: zip
+    refresh_frequency: nightly
+
   petrinex_public_well_facility_bridge:
     enabled: true
     source_name: petrinex_bridge

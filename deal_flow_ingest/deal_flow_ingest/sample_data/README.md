@@ -5,4 +5,4 @@ Current dry-run coverage includes:
 - AER general well data enrichment
 - AER ST102 facility-list enrichment
 - AMI Crown disposition, client, land-key, and participant samples
-- Petrinex business associates, facilities, bridge links, and production
+- Petrinex business associates, well infrastructure, well licence, facilities, bridge links, and production

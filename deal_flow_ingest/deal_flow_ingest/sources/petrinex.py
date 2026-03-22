@@ -19,14 +19,8 @@ _PETRINEX_DIRECT_URLS = {
     "operators": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Business%20Associate/CSV",
     "well_facility_bridge": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20to%20Facility%20Link/CSV",
     "facility_master": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Facility%20Infrastructure/CSV",
-}
-
-
-_DATA_KIND_TO_DISCOVERY_KEY = {
-    "facility_master": "facility_master",
-    "well_facility_bridge": "well_facility_bridge",
-    "facility_production": "monthly_production",
-    "operators": "business_associate",
+    "petrinex_public_well_infrastructure": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20Infrastructure/CSV",
+    "petrinex_public_well_licence": "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20Licence/CSV",
 }
 
 
@@ -37,8 +31,12 @@ def load_public_data(
     start_date: date | None = None,
     end_date: date | None = None,
 ) -> pd.DataFrame:
-    artifact_url = (source.dataset_url or _PETRINEX_DIRECT_URLS.get(source.data_kind, "")).strip()
-    discovery_key = _DATA_KIND_TO_DISCOVERY_KEY.get(source.data_kind)
+    artifact_url = (
+        source.dataset_url
+        or _PETRINEX_DIRECT_URLS.get(source.key, "")
+        or _PETRINEX_DIRECT_URLS.get(source.data_kind, "")
+    ).strip()
+    discovery_key = _source_to_discovery_key(source)
 
     if source.data_kind == "facility_production":
         df = _load_monthly_production_range(downloader, source, refresh, start_date, end_date)
@@ -77,6 +75,10 @@ def load_public_data(
         parsed = load_monthly_production(df)
     elif source.data_kind == "operators":
         parsed = load_business_associate(df)
+    elif source.key == "petrinex_public_well_infrastructure":
+        parsed = load_well_infrastructure(df)
+    elif source.key == "petrinex_public_well_licence":
+        parsed = load_well_licence(df)
     else:
         parsed = df
 
@@ -186,6 +188,8 @@ def _discover_petrinex_artifact_urls(html: str, base_url: str = "https://www.pet
         "facility_master": ["facility", "master"],
         "monthly_production": ["facility", "production"],
         "well_facility_bridge": ["well-facility"],
+        "well_infrastructure": ["well", "infrastructure"],
+        "well_licence": ["well", "licence"],
         "business_associate": ["business", "associate"],
     }
 
@@ -225,6 +229,22 @@ def _discover_petrinex_artifact_urls(html: str, base_url: str = "https://www.pet
         if options:
             discovered[key] = max(options, key=lambda item: item[0])[1]
     return discovered
+
+
+def _source_to_discovery_key(source: SourcePayload) -> str | None:
+    if source.key == "petrinex_public_well_infrastructure":
+        return "well_infrastructure"
+    if source.key == "petrinex_public_well_licence":
+        return "well_licence"
+    if source.data_kind == "facility_master":
+        return "facility_master"
+    if source.data_kind == "well_facility_bridge":
+        return "well_facility_bridge"
+    if source.data_kind == "facility_production":
+        return "monthly_production"
+    if source.data_kind == "operators":
+        return "business_associate"
+    return None
 
 
 def _guess_file_type(url: str, default_file_type: str) -> str:
@@ -330,6 +350,86 @@ def load_well_facility_bridge(df: pd.DataFrame) -> pd.DataFrame:
         df, cols, ("linkedfacilityid", "facility_id", "facility id", "facility", "facility ba id"), ""
     )
     out["effective_from"] = _column_as_series(df, cols, ("linkedstartdate", "effective_from", "effective from"), None)
+    return out
+
+
+def load_well_infrastructure(df: pd.DataFrame) -> pd.DataFrame:
+    cols = {c.lower().strip(): c for c in df.columns}
+    out = pd.DataFrame(index=df.index)
+    out["uwi"] = _column_as_series(
+        df,
+        cols,
+        ("wellidentifier", "well identifier", "wellid", "well_id", "well id", "uwi", "well"),
+        "",
+    )
+    out["license_number"] = _column_as_series(
+        df,
+        cols,
+        ("welllicencenumber", "well licence number", "licencenumber", "license number", "licence number", "licencenumber"),
+        None,
+    )
+    out["well_name"] = _column_as_series(df, cols, ("wellname", "well name"), None)
+    out["field_name"] = _column_as_series(df, cols, ("fieldname", "field name", "field"), None)
+    out["pool_name"] = _column_as_series(df, cols, ("poolname", "pool name", "pooldepositname", "targetpool"), None)
+    out["licensee"] = _column_as_series(
+        df,
+        cols,
+        ("licenseename", "licensee name", "licensee", "operatorname", "operator name", "licenseename", "linkedfacilityoperatorlegalname"),
+        "",
+    )
+    out["status"] = _column_as_series(
+        df,
+        cols,
+        ("wellstatusmode", "well status mode", "wellstatus", "well status", "currentstatus", "current status", "wellstatustype", "well status type", "licencestatus", "licence status", "status"),
+        None,
+    )
+    out["spud_date"] = _column_as_series(df, cols, ("spuddate", "spud date"), None)
+    out["lsd"] = _column_as_series(df, cols, ("welllegalsubdivision", "well legal subdivision", "lsd"), None)
+    out["section"] = _column_as_series(df, cols, ("wellsection", "well section", "section"), None)
+    out["township"] = _column_as_series(df, cols, ("welltownship", "well township", "township"), None)
+    out["range"] = _column_as_series(df, cols, ("wellrange", "well range", "range"), None)
+    out["meridian"] = _column_as_series(df, cols, ("wellmeridian", "well meridian", "meridian"), None)
+    out["licensee"] = out["licensee"].fillna("").astype(str)
+    return out
+
+
+def load_well_licence(df: pd.DataFrame) -> pd.DataFrame:
+    cols = {c.lower().strip(): c for c in df.columns}
+    out = pd.DataFrame(index=df.index)
+    out["uwi"] = _column_as_series(
+        df,
+        cols,
+        ("wellidentifier", "well identifier", "wellid", "well_id", "well id", "uwi", "well"),
+        "",
+    )
+    out["license_number"] = _column_as_series(
+        df,
+        cols,
+        ("welllicencenumber", "well licence number", "licencenumber", "license number", "licence number", "licencenumber", "licencenumber"),
+        None,
+    )
+    out["licensee"] = _column_as_series(
+        df,
+        cols,
+        ("licenseename", "licensee name", "licenceename", "licencee name", "licensee", "operatorname", "operator name"),
+        "",
+    )
+    out["status"] = _column_as_series(
+        df,
+        cols,
+        ("licencestatus", "license status", "welllicencestatus", "well licence status", "status"),
+        None,
+    )
+    out["spud_date"] = _column_as_series(df, cols, ("spuddate", "spud date", "licenceissuedate", "licence issue date"), None)
+    out["well_name"] = _column_as_series(df, cols, ("wellname", "well name", "licencelocation", "licence location"), None)
+    out["field_name"] = _column_as_series(df, cols, ("fieldname", "field name"), None)
+    out["pool_name"] = _column_as_series(df, cols, ("poolname", "pool name", "targetpool"), None)
+    out["lsd"] = _column_as_series(df, cols, ("licencelegalsubdivision", "licence legal subdivision", "lsd"), None)
+    out["section"] = _column_as_series(df, cols, ("licencesection", "licence section", "section"), None)
+    out["township"] = _column_as_series(df, cols, ("licencetownship", "licence township", "township"), None)
+    out["range"] = _column_as_series(df, cols, ("licencerange", "licence range", "range"), None)
+    out["meridian"] = _column_as_series(df, cols, ("licencemeridian", "licence meridian", "meridian"), None)
+    out["licensee"] = out["licensee"].fillna("").astype(str)
     return out
 
 

@@ -464,8 +464,10 @@ def replace_fact_liability(conn: Connection, df: pd.DataFrame, source: str) -> i
 def replace_fact_well_status(conn: Connection, df: pd.DataFrame, source: str) -> int:
     if df.empty:
         return 0
-    conn.execute(delete(FactWellStatus).where(FactWellStatus.source == source))
-    cleaned = df.astype(object).where(pd.notnull(df), None)
+    cleaned = df.drop_duplicates(subset=["well_id", "status", "status_date", "source"], keep="last")
+    source_values = cleaned["source"].dropna().astype(str).unique().tolist() if "source" in cleaned.columns else [source]
+    conn.execute(delete(FactWellStatus).where(FactWellStatus.source.in_(source_values)))
+    cleaned = cleaned.astype(object).where(pd.notnull(cleaned), None)
     payload = cleaned.to_dict(orient="records")
     return _execute_insert_in_chunks(conn, FactWellStatus, payload, FactWellStatus.__tablename__)
 

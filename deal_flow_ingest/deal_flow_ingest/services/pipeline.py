@@ -554,6 +554,72 @@ def prepare_wells_df(frames_by_kind: dict[str, list[pd.DataFrame]], op_map: dict
         out["last_seen"] = as_of
         out["source"] = df.get("source", "multi_source")
 
+        licence_only = df.copy()
+        licence_only["license_number"] = licence_only.get("license_number", pd.Series([None] * len(licence_only), index=licence_only.index)).map(
+            _stringify_identifier
+        )
+        licence_only["uwi"] = licence_only.get("uwi", pd.Series([""] * len(licence_only), index=licence_only.index)).fillna("").astype(str).map(
+            normalize_uwi
+        )
+        licence_only = licence_only[
+            (licence_only["license_number"].fillna("").astype(str).str.strip() != "")
+            & (licence_only["uwi"].fillna("").astype(str).str.strip() == "")
+        ]
+        if not licence_only.empty:
+            licence_only = licence_only.assign(
+                well_name=licence_only.get("well_name"),
+                field_name=licence_only.get("field_name"),
+                pool_name=licence_only.get("pool_name"),
+                status=licence_only.get("status"),
+                licensee=licence_only.get("licensee"),
+                spud_date=licence_only.get("spud_date"),
+                lsd=licence_only.get("lsd"),
+                section=licence_only.get("section"),
+                township=licence_only.get("township"),
+                range=licence_only.get("range"),
+                meridian=licence_only.get("meridian"),
+                source=licence_only.get("source"),
+            )
+            licence_enrichment = (
+                licence_only.groupby("license_number", dropna=False, sort=False)
+                .agg(
+                    {
+                        "well_name": _first_non_empty,
+                        "field_name": _first_non_empty,
+                        "pool_name": _first_non_empty,
+                        "status": _first_non_empty,
+                        "licensee": _first_non_empty,
+                        "spud_date": _first_non_empty,
+                        "lsd": _first_non_empty,
+                        "section": _first_non_empty,
+                        "township": _first_non_empty,
+                        "range": _first_non_empty,
+                        "meridian": _first_non_empty,
+                        "source": _first_non_empty,
+                    }
+                )
+                .reset_index()
+            )
+            if not licence_enrichment.empty:
+                out_license_numbers = out["license_number"].map(_stringify_identifier)
+                for column in ("well_name", "field_name", "pool_name", "spud_date", "lsd", "section", "township", "range", "meridian", "source"):
+                    existing = out[column]
+                    mapped = out_license_numbers.map(licence_enrichment.set_index("license_number")[column])
+                    out[column] = existing.where(existing.notna() & (existing.astype(str).str.strip() != ""), mapped)
+                mapped_status = out_license_numbers.map(licence_enrichment.set_index("license_number")["status"])
+                existing_status = _normalize_status_series(out["status"])
+                out["status"] = existing_status.where(existing_status != "UNKNOWN", mapped_status)
+                existing_operator = out["licensee_operator_id"]
+                mapped_licensee = out_license_numbers.map(licence_enrichment.set_index("license_number")["licensee"])
+                mapped_operator = mapped_licensee.fillna("").astype(str).map(normalize_operator_name).map(op_map)
+                out["licensee_operator_id"] = existing_operator.where(existing_operator.notna(), mapped_operator)
+                out["status"] = _normalize_status_series(out["status"])
+                out["spud_date"] = pd.to_datetime(out["spud_date"], errors="coerce").dt.date
+                out["section"] = pd.to_numeric(out["section"], errors="coerce")
+                out["township"] = pd.to_numeric(out["township"], errors="coerce")
+                out["range"] = pd.to_numeric(out["range"], errors="coerce")
+                out["meridian"] = pd.to_numeric(out["meridian"], errors="coerce")
+
     bridge_raw = _merge_kind_frames(frames_by_kind, "well_facility_bridge")
     if not bridge_raw.empty and "well_id" in bridge_raw.columns:
         bridge_well_ids = bridge_raw["well_id"].fillna("").astype(str).map(normalize_uwi)

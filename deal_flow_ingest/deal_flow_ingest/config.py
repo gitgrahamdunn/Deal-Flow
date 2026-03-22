@@ -60,6 +60,8 @@ DATASET_KIND_MAP = {
     "petrinex_public_monthly_production": "facility_production",
     "petrinex_public_well_facility_bridge": "well_facility_bridge",
     "petrinex_public_facility_master": "facility_master",
+    "petrinex_public_well_infrastructure": "wells",
+    "petrinex_public_well_licence": "wells",
     "petrinex_public_data": "operators",
     "open_alberta_placeholder": "open_alberta",
     # Legacy keys

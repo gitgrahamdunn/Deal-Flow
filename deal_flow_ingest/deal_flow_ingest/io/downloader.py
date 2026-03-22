@@ -8,6 +8,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import requests
+from requests import RequestException
 
 from deal_flow_ingest.io.cache import cache_key_from_url, content_sha256, load_metadata, save_metadata
 
@@ -71,7 +72,20 @@ class Downloader:
         if file_type and file_type.lower() == "html":
             request_headers.setdefault("Referer", url)
 
-        resp = self.session.get(url, headers=request_headers, timeout=timeout)
+        resp = None
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = self.session.get(url, headers=request_headers, timeout=timeout)
+                break
+            except RequestException as exc:
+                last_exc = exc
+                if attempt == 2:
+                    raise
+        if resp is None:
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError(f"Downloader received no response for {url}")
         cached_name = url_meta.get("file")
         if resp.status_code == 304 and cached_name:
             cached_path = source_dir / cached_name

@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 from sqlalchemy import create_engine, func, select
 
-from deal_flow_ingest.db.load import upsert_dim_well
-from deal_flow_ingest.db.schema import Base, DimWell
+from deal_flow_ingest.db.load import replace_fact_well_status, upsert_dim_well
+from deal_flow_ingest.db.schema import Base, DimWell, FactWellStatus
 
 
 def test_upsert_dim_well_large_sqlite_batch_succeeds():
@@ -75,3 +75,53 @@ def test_upsert_dim_well_dedupes_by_completeness_score():
         assert retained.licensee_operator_id == 123
         assert retained.section == 11
         assert retained.lat == 51.0
+
+
+def test_replace_fact_well_status_dedupes_duplicate_unique_keys():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    status_df = pd.DataFrame(
+        {
+            "well_id": ["WELL-1", "WELL-1", "WELL-2"],
+            "status": ["UNKNOWN", "UNKNOWN", "ACTIVE"],
+            "status_date": [None, None, pd.Timestamp("2025-01-01").date()],
+            "source": ["aer_st37", "aer_st37", "aer_st37"],
+        }
+    )
+
+    with engine.begin() as conn:
+        affected = replace_fact_well_status(conn, status_df, "aer_st37")
+        assert affected == 2
+
+        rows = conn.execute(select(FactWellStatus)).all()
+        assert len(rows) == 2
+
+
+def test_replace_fact_well_status_replaces_existing_rows_across_payload_sources():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    initial_df = pd.DataFrame(
+        {
+            "well_id": ["WELL-1", "WELL-2"],
+            "status": ["UNKNOWN", "SHUT-IN"],
+            "status_date": [None, pd.Timestamp("2025-02-01").date()],
+            "source": ["aer_st37", "petrinex_monthly_activity"],
+        }
+    )
+    replacement_df = pd.DataFrame(
+        {
+            "well_id": ["WELL-1", "WELL-2"],
+            "status": ["UNKNOWN", "SHUT-IN"],
+            "status_date": [None, pd.Timestamp("2025-02-01").date()],
+            "source": ["aer_st37", "petrinex_monthly_activity"],
+        }
+    )
+
+    with engine.begin() as conn:
+        assert replace_fact_well_status(conn, initial_df, "aer_st37") == 2
+        assert replace_fact_well_status(conn, replacement_df, "aer_st37") == 2
+
+        rows = conn.execute(select(FactWellStatus)).all()
+        assert len(rows) == 2
