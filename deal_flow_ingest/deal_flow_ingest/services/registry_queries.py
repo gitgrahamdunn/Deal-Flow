@@ -10,6 +10,11 @@ from deal_flow_ingest.config import get_database_url
 from deal_flow_ingest.db.schema import get_engine
 
 
+ALLOWED_ASSET_TYPES = {"wells", "facilities", "pipelines"}
+DEFAULT_LIMIT_PER_LAYER = 50000
+MAX_LIMIT_PER_LAYER = 100000
+
+
 @dataclass(slots=True)
 class RegistryMapFilters:
     asset_types: tuple[str, ...] = ("wells", "facilities", "pipelines")
@@ -20,7 +25,41 @@ class RegistryMapFilters:
     max_lat: float | None = None
     min_lon: float | None = None
     max_lon: float | None = None
-    limit_per_layer: int = 50000
+    limit_per_layer: int = DEFAULT_LIMIT_PER_LAYER
+
+
+def _normalize_filters(filters: RegistryMapFilters) -> RegistryMapFilters:
+    asset_types = tuple(dict.fromkeys(asset_type.strip().lower() for asset_type in filters.asset_types if str(asset_type).strip()))
+    if not asset_types:
+        asset_types = tuple(sorted(ALLOWED_ASSET_TYPES))
+    unknown_asset_types = sorted(set(asset_types) - ALLOWED_ASSET_TYPES)
+    if unknown_asset_types:
+        raise ValueError(f"Unknown asset_types: {', '.join(unknown_asset_types)}")
+
+    statuses = tuple(dict.fromkeys(status.strip() for status in filters.statuses if str(status).strip()))
+    operator = filters.operator.strip() if isinstance(filters.operator, str) and filters.operator.strip() else None
+
+    limit_per_layer = int(filters.limit_per_layer)
+    if limit_per_layer <= 0:
+        raise ValueError("limit_per_layer must be positive")
+    limit_per_layer = min(limit_per_layer, MAX_LIMIT_PER_LAYER)
+
+    if filters.min_lat is not None and filters.max_lat is not None and filters.min_lat > filters.max_lat:
+        raise ValueError("min_lat cannot be greater than max_lat")
+    if filters.min_lon is not None and filters.max_lon is not None and filters.min_lon > filters.max_lon:
+        raise ValueError("min_lon cannot be greater than max_lon")
+
+    return RegistryMapFilters(
+        asset_types=asset_types,
+        operator=operator,
+        statuses=statuses,
+        candidate_only=bool(filters.candidate_only),
+        min_lat=filters.min_lat,
+        max_lat=filters.max_lat,
+        min_lon=filters.min_lon,
+        max_lon=filters.max_lon,
+        limit_per_layer=limit_per_layer,
+    )
 
 
 def _read_frame(sql: str, params: dict[str, object] | None = None) -> pd.DataFrame:
@@ -223,7 +262,7 @@ def _get_pipelines_layer(filters: RegistryMapFilters) -> pd.DataFrame:
 
 
 def get_registry_map_layers(filters: RegistryMapFilters | None = None) -> dict[str, pd.DataFrame]:
-    filters = filters or RegistryMapFilters()
+    filters = _normalize_filters(filters or RegistryMapFilters())
     requested = set(filters.asset_types)
     layers: dict[str, pd.DataFrame] = {}
     if "wells" in requested:

@@ -6,6 +6,7 @@ from deal_flow_ingest.apply_saved_sql import apply_saved_sql
 from deal_flow_ingest.cli import run_ingestion
 from deal_flow_ingest.config import get_default_config_path
 from deal_flow_ingest.services.registry_queries import (
+    MAX_LIMIT_PER_LAYER,
     RegistryMapFilters,
     get_combined_registry_map_frame,
     get_registry_filter_options,
@@ -76,3 +77,38 @@ def test_registry_pipeline_layer_exposes_line_geometry(tmp_path: Path) -> None:
     assert "geometry_wkt" in layers["pipelines"].columns
     assert layers["pipelines"]["geometry_wkt"].notna().all()
     assert layers["pipelines"]["geometry_wkt"].str.startswith("LINESTRING (").all()
+
+
+def test_registry_filters_normalize_and_cap_payloads(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+
+    layers = get_registry_map_layers(
+        RegistryMapFilters(
+            asset_types=("wells", "wells", "facilities"),
+            operator="  ALPHA ENERGY LTD  ",
+            statuses=(" ACTIVE ", "", "ACTIVE"),
+            limit_per_layer=MAX_LIMIT_PER_LAYER + 5000,
+        )
+    )
+
+    assert set(layers) == {"wells", "facilities"}
+    assert len(layers["wells"]) <= MAX_LIMIT_PER_LAYER
+    assert layers["wells"]["operator"].eq("ALPHA ENERGY LTD").all()
+
+
+def test_registry_filters_reject_invalid_ranges_and_asset_types(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+
+    try:
+        get_registry_map_layers(RegistryMapFilters(asset_types=("wells", "leases")))
+    except ValueError as exc:
+        assert "Unknown asset_types" in str(exc)
+    else:  # pragma: no cover - explicit failure path
+        raise AssertionError("Expected invalid asset_types to raise ValueError")
+
+    try:
+        get_registry_map_layers(RegistryMapFilters(min_lat=53.0, max_lat=52.0))
+    except ValueError as exc:
+        assert "min_lat cannot be greater than max_lat" in str(exc)
+    else:  # pragma: no cover - explicit failure path
+        raise AssertionError("Expected invalid latitude bounds to raise ValueError")
