@@ -144,6 +144,7 @@ PIPELINE_DIM_COLUMNS = [
     "substance3",
     "segment_length_km",
     "geometry_source",
+    "geometry_wkt",
     "centroid_lat",
     "centroid_lon",
     "source",
@@ -644,6 +645,7 @@ def prepare_pipelines_df(frames_by_kind: dict[str, list[pd.DataFrame]], operator
     pipe_df["substance3"] = pipe_raw.get("substance3")
     pipe_df["segment_length_km"] = pd.to_numeric(pipe_raw.get("segment_length_km"), errors="coerce")
     pipe_df["geometry_source"] = pipe_raw.get("geometry_source")
+    pipe_df["geometry_wkt"] = pipe_raw.get("geometry_wkt")
     pipe_df["centroid_lat"] = pd.to_numeric(pipe_raw.get("centroid_lat"), errors="coerce")
     pipe_df["centroid_lon"] = pd.to_numeric(pipe_raw.get("centroid_lon"), errors="coerce")
     pipe_df["source"] = pipe_raw.get("source", "aer_spatial_pipelines")

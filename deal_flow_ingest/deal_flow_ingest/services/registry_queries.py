@@ -208,6 +208,7 @@ def _get_pipelines_layer(filters: RegistryMapFilters) -> pd.DataFrame:
         p.company_name,
         p.substance1,
         p.segment_length_km,
+        p.geometry_wkt,
         CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
         0 AS candidate_restart,
         CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_any

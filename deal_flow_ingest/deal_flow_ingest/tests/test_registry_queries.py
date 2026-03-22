@@ -65,3 +65,14 @@ def test_registry_filter_options_expose_frontend_choices(tmp_path: Path) -> None
     assert "ACTIVE" in options["well_statuses"]
     assert "ACTIVE" in options["facility_statuses"]
     assert "Operating" in options["pipeline_statuses"]
+
+
+def test_registry_pipeline_layer_exposes_line_geometry(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+
+    layers = get_registry_map_layers(RegistryMapFilters(asset_types=("pipelines",)))
+
+    assert not layers["pipelines"].empty
+    assert "geometry_wkt" in layers["pipelines"].columns
+    assert layers["pipelines"]["geometry_wkt"].notna().all()
+    assert layers["pipelines"]["geometry_wkt"].str.startswith("LINESTRING (").all()

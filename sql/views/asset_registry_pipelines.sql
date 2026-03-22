@@ -17,6 +17,7 @@ SELECT
     p.substance3,
     ROUND(COALESCE(p.segment_length_km, 0), 4) AS segment_length_km,
     p.geometry_source,
+    p.geometry_wkt,
     p.centroid_lat,
     p.centroid_lon,
     p.source

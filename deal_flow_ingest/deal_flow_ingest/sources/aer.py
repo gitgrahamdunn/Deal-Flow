@@ -968,6 +968,7 @@ def _read_pipeline_shapefile(path: Path) -> pd.DataFrame:
         shape = reader.shape(idx)
         points = shape.points
         if points:
+            row["geometry_wkt"] = "LINESTRING (" + ", ".join(f"{point[0]} {point[1]}" for point in points) + ")"
             xs = [point[0] for point in points]
             ys = [point[1] for point in points]
             row["centroid_lon"] = (min(xs) + max(xs)) / 2.0
@@ -1007,6 +1008,7 @@ def load_spatial_pipelines_frame(source: pd.DataFrame | Path) -> pd.DataFrame:
     out["substance3"] = _column_as_series(df, cols, ("substance_3", "substance3"), "")
     out["segment_length_km"] = _column_as_series(df, cols, ("segment_length", "seg_length"), None)
     out["geometry_source"] = _column_as_series(df, cols, ("geometry_source", "geom_srce"), "")
+    out["geometry_wkt"] = _column_as_series(df, cols, ("geometry_wkt",), None)
     out["centroid_lat"] = _column_as_series(df, cols, ("centroid_lat",), None)
     out["centroid_lon"] = _column_as_series(df, cols, ("centroid_lon",), None)
 

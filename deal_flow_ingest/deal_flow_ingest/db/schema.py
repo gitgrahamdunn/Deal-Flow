@@ -128,6 +128,7 @@ class DimPipeline(TimestampMixin, Base):
     substance3: Mapped[str | None] = mapped_column(Text)
     segment_length_km: Mapped[float | None] = mapped_column(Float)
     geometry_source: Mapped[str | None] = mapped_column(Text)
+    geometry_wkt: Mapped[str | None] = mapped_column(Text)
     centroid_lat: Mapped[float | None] = mapped_column(Float)
     centroid_lon: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str | None] = mapped_column(Text)

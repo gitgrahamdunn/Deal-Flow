@@ -94,6 +94,7 @@ def test_parse_pipeline_shapefile(tmp_path: Path) -> None:
     assert parsed.iloc[0]["company_name"] == "ATCO Gas And Pipelines Ltd."
     assert parsed.iloc[0]["segment_status"] == "Operating"
     assert parsed.iloc[0]["substance1"] == "Natural gas"
+    assert parsed.iloc[0]["geometry_wkt"].startswith("LINESTRING (")
     assert round(float(parsed.iloc[0]["centroid_lat"]), 3) == 52.315
     assert round(float(parsed.iloc[0]["centroid_lon"]), 3) == -110.935
 
