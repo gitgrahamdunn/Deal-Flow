@@ -70,6 +70,12 @@ def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> p
 
 
 def load_general_well_data(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
+    if not (source.local_live_file or "").strip() and not (source.dataset_url or "").strip():
+        LOGGER.warning(
+            "AER General Well Data live bulk access is not anonymously downloadable; "
+            "configure local_live_file with a licensed extract to ingest it."
+        )
+        return pd.DataFrame()
     return _load_aer_tabular_source(
         downloader,
         source,

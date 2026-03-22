@@ -1,0 +1,279 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pandas as pd
+from sqlalchemy import text
+
+from deal_flow_ingest.apply_saved_sql import apply_saved_sql
+from deal_flow_ingest.config import get_database_url
+from deal_flow_ingest.db.schema import get_engine
+
+
+@dataclass(slots=True)
+class RegistryMapFilters:
+    asset_types: tuple[str, ...] = ("wells", "facilities", "pipelines")
+    operator: str | None = None
+    statuses: tuple[str, ...] = ()
+    candidate_only: bool = False
+    min_lat: float | None = None
+    max_lat: float | None = None
+    min_lon: float | None = None
+    max_lon: float | None = None
+    limit_per_layer: int = 50000
+
+
+def _read_frame(sql: str, params: dict[str, object] | None = None) -> pd.DataFrame:
+    engine = get_engine(get_database_url())
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text(sql), conn, params=params)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "no such table:" not in message and "no such view:" not in message:
+            raise
+
+    apply_saved_sql()
+    with engine.connect() as conn:
+        return pd.read_sql(text(sql), conn, params=params)
+
+
+def _append_common_filters(
+    clauses: list[str],
+    params: dict[str, object],
+    *,
+    alias: str,
+    status_column: str,
+    lat_column: str,
+    lon_column: str,
+    filters: RegistryMapFilters,
+) -> None:
+    if filters.operator:
+        clauses.append(f"{alias}.operator = :operator")
+        params["operator"] = filters.operator
+    if filters.statuses:
+        placeholders = []
+        for idx, status in enumerate(filters.statuses):
+            key = f"status_{idx}"
+            placeholders.append(f":{key}")
+            params[key] = status
+        clauses.append(f"{alias}.{status_column} IN ({', '.join(placeholders)})")
+    if filters.min_lat is not None:
+        clauses.append(f"{alias}.{lat_column} >= :min_lat")
+        params["min_lat"] = filters.min_lat
+    if filters.max_lat is not None:
+        clauses.append(f"{alias}.{lat_column} <= :max_lat")
+        params["max_lat"] = filters.max_lat
+    if filters.min_lon is not None:
+        clauses.append(f"{alias}.{lon_column} >= :min_lon")
+        params["min_lon"] = filters.min_lon
+    if filters.max_lon is not None:
+        clauses.append(f"{alias}.{lon_column} <= :max_lon")
+        params["max_lon"] = filters.max_lon
+
+
+def _get_wells_layer(filters: RegistryMapFilters) -> pd.DataFrame:
+    clauses = ["w.lat IS NOT NULL", "w.lon IS NOT NULL"]
+    params: dict[str, object] = {"limit": filters.limit_per_layer}
+    _append_common_filters(
+        clauses,
+        params,
+        alias="w",
+        status_column="status",
+        lat_column="lat",
+        lon_column="lon",
+        filters=filters,
+    )
+    if filters.candidate_only:
+        clauses.append("(seller.operator IS NOT NULL OR restart.well_id IS NOT NULL)")
+
+    sql = f"""
+    WITH seller AS (
+        SELECT DISTINCT operator
+        FROM seller_theses
+    ),
+    restart AS (
+        SELECT DISTINCT well_id
+        FROM restart_well_candidates
+    )
+    SELECT
+        'well' AS asset_type,
+        w.well_id AS asset_id,
+        w.well_name AS asset_name,
+        w.license_number,
+        w.operator,
+        w.status,
+        w.lat,
+        w.lon,
+        w.field_name,
+        w.pool_name,
+        w.restart_score,
+        CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
+        CASE WHEN restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_restart,
+        CASE WHEN seller.operator IS NOT NULL OR restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_any
+    FROM asset_registry_wells w
+    LEFT JOIN seller
+        ON seller.operator = w.operator
+    LEFT JOIN restart
+        ON restart.well_id = w.well_id
+    WHERE {' AND '.join(clauses)}
+    ORDER BY candidate_any DESC, COALESCE(w.restart_score, 0) DESC, w.well_id
+    LIMIT :limit
+    """
+    return _read_frame(sql, params)
+
+
+def _get_facilities_layer(filters: RegistryMapFilters) -> pd.DataFrame:
+    clauses = ["f.lat IS NOT NULL", "f.lon IS NOT NULL"]
+    params: dict[str, object] = {"limit": filters.limit_per_layer}
+    _append_common_filters(
+        clauses,
+        params,
+        alias="f",
+        status_column="facility_status",
+        lat_column="lat",
+        lon_column="lon",
+        filters=filters,
+    )
+    if filters.candidate_only:
+        clauses.append("(seller.operator IS NOT NULL OR restart_facility.facility_id IS NOT NULL)")
+
+    sql = f"""
+    WITH seller AS (
+        SELECT DISTINCT operator
+        FROM seller_theses
+    ),
+    restart_facility AS (
+        SELECT DISTINCT bwf.facility_id
+        FROM bridge_well_facility bwf
+        JOIN restart_well_candidates rwc
+            ON rwc.well_id = bwf.well_id
+    )
+    SELECT
+        'facility' AS asset_type,
+        f.facility_id AS asset_id,
+        f.facility_name AS asset_name,
+        f.license_number,
+        f.operator,
+        f.facility_status AS status,
+        f.lat,
+        f.lon,
+        f.facility_type,
+        f.facility_subtype,
+        f.linked_well_count,
+        CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
+        CASE WHEN restart_facility.facility_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_restart,
+        CASE WHEN seller.operator IS NOT NULL OR restart_facility.facility_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_any
+    FROM asset_registry_facilities f
+    LEFT JOIN seller
+        ON seller.operator = f.operator
+    LEFT JOIN restart_facility
+        ON restart_facility.facility_id = f.facility_id
+    WHERE {' AND '.join(clauses)}
+    ORDER BY candidate_any DESC, COALESCE(f.linked_well_count, 0) DESC, f.facility_id
+    LIMIT :limit
+    """
+    return _read_frame(sql, params)
+
+
+def _get_pipelines_layer(filters: RegistryMapFilters) -> pd.DataFrame:
+    clauses = ["p.centroid_lat IS NOT NULL", "p.centroid_lon IS NOT NULL"]
+    params: dict[str, object] = {"limit": filters.limit_per_layer}
+    _append_common_filters(
+        clauses,
+        params,
+        alias="p",
+        status_column="segment_status",
+        lat_column="centroid_lat",
+        lon_column="centroid_lon",
+        filters=filters,
+    )
+    if filters.candidate_only:
+        clauses.append("seller.operator IS NOT NULL")
+
+    sql = f"""
+    WITH seller AS (
+        SELECT DISTINCT operator
+        FROM seller_theses
+    )
+    SELECT
+        'pipeline' AS asset_type,
+        p.pipeline_id AS asset_id,
+        p.licence_line_number AS asset_name,
+        p.license_number,
+        p.operator,
+        p.segment_status AS status,
+        p.centroid_lat AS lat,
+        p.centroid_lon AS lon,
+        p.company_name,
+        p.substance1,
+        p.segment_length_km,
+        CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
+        0 AS candidate_restart,
+        CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_any
+    FROM asset_registry_pipelines p
+    LEFT JOIN seller
+        ON seller.operator = p.operator
+    WHERE {' AND '.join(clauses)}
+    ORDER BY candidate_any DESC, COALESCE(p.segment_length_km, 0) DESC, p.pipeline_id
+    LIMIT :limit
+    """
+    return _read_frame(sql, params)
+
+
+def get_registry_map_layers(filters: RegistryMapFilters | None = None) -> dict[str, pd.DataFrame]:
+    filters = filters or RegistryMapFilters()
+    requested = set(filters.asset_types)
+    layers: dict[str, pd.DataFrame] = {}
+    if "wells" in requested:
+        layers["wells"] = _get_wells_layer(filters)
+    if "facilities" in requested:
+        layers["facilities"] = _get_facilities_layer(filters)
+    if "pipelines" in requested:
+        layers["pipelines"] = _get_pipelines_layer(filters)
+    return layers
+
+
+def get_combined_registry_map_frame(filters: RegistryMapFilters | None = None) -> pd.DataFrame:
+    layers = get_registry_map_layers(filters)
+    frames = [frame for frame in layers.values() if not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def get_registry_filter_options() -> dict[str, list[str]]:
+    operators = _read_frame(
+        """
+        SELECT operator
+        FROM (
+            SELECT DISTINCT operator FROM asset_registry_wells WHERE operator IS NOT NULL AND TRIM(operator) <> ''
+            UNION
+            SELECT DISTINCT operator FROM asset_registry_facilities WHERE operator IS NOT NULL AND TRIM(operator) <> ''
+            UNION
+            SELECT DISTINCT operator FROM asset_registry_pipelines WHERE operator IS NOT NULL AND TRIM(operator) <> ''
+        )
+        ORDER BY operator
+        """
+    )
+    well_statuses = _read_frame(
+        "SELECT DISTINCT status FROM asset_registry_wells WHERE status IS NOT NULL AND TRIM(status) <> '' ORDER BY status"
+    )
+    facility_statuses = _read_frame(
+        "SELECT DISTINCT facility_status AS status FROM asset_registry_facilities "
+        "WHERE facility_status IS NOT NULL AND TRIM(facility_status) <> '' ORDER BY facility_status"
+    )
+    pipeline_statuses = _read_frame(
+        "SELECT DISTINCT segment_status AS status FROM asset_registry_pipelines "
+        "WHERE segment_status IS NOT NULL AND TRIM(segment_status) <> '' ORDER BY segment_status"
+    )
+    return {
+        "operators": operators["operator"].dropna().astype(str).tolist() if "operator" in operators.columns else [],
+        "well_statuses": well_statuses["status"].dropna().astype(str).tolist() if "status" in well_statuses.columns else [],
+        "facility_statuses": facility_statuses["status"].dropna().astype(str).tolist()
+        if "status" in facility_statuses.columns
+        else [],
+        "pipeline_statuses": pipeline_statuses["status"].dropna().astype(str).tolist()
+        if "status" in pipeline_statuses.columns
+        else [],
+    }

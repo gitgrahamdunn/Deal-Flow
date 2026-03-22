@@ -3,9 +3,11 @@ from pathlib import Path
 import pandas as pd
 import shapefile
 
+from deal_flow_ingest.config import SourcePayload
 from deal_flow_ingest.sources.aer import (
     _discover_aer_artifact_url,
     load_general_well_data_frame,
+    load_general_well_data,
     load_spatial_pipelines_frame,
     load_st102_facility_list_frame,
 )
@@ -129,3 +131,28 @@ def test_discover_aer_artifact_url_rejects_wrong_general_well_workbook() -> None
         )
         is None
     )
+
+
+class _NoopDownloader:
+    def fetch(self, *_args, **_kwargs):  # pragma: no cover - should not be called in this test
+        raise AssertionError("Downloader should not be called when general well data has no local override")
+
+
+def test_general_well_data_requires_local_override_for_live_bulk() -> None:
+    source = SourcePayload(
+        key="aer_general_well_data",
+        source_name="aer_general_well_data",
+        data_kind="wells",
+        enabled=True,
+        local_sample=None,
+        local_live_file="",
+        parser_name="aer_general_well_data",
+        landing_page_url="https://www.aer.ca/data-and-performance-reports/activity-and-data/lists-and-activities/general-well-data",
+        dataset_url="",
+        file_type="xlsx",
+        refresh_frequency="daily",
+    )
+
+    parsed = load_general_well_data(downloader=_NoopDownloader(), source=source, refresh=False)
+
+    assert parsed.empty

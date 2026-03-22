@@ -113,6 +113,8 @@ Outputs are written by default to:
 
 Source dataset routing is composable: connectors now feed `dict[str, list[pd.DataFrame]]` and are merged explicitly by data kind, so future multi-source overlays no longer overwrite by `data_kind`.
 
+For frontend work, use the backend query contract in `services/registry_queries.py`. It provides filtered well/facility/pipeline map layers, candidate overlays, combined map frames, and filter-option lookups without exposing the frontend directly to raw SQL view wiring.
+
 ## Source discovery flow
 
 - **AER ST37**: local file override → configured artifact URL → discovered URL from configured landing pages; discovered URLs are cached in source metadata.

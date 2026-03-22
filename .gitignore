@@ -1,0 +1,12 @@
+.pytest_cache/
+.venv/
+__pycache__/
+*.py[cod]
+
+data/
+output/
+
+*.egg-info/
+
+deal_flow_ingest/**/__pycache__/
+deal_flow_ingest/**/*.egg-info/
