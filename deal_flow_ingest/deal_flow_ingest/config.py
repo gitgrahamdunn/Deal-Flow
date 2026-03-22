@@ -48,6 +48,13 @@ class SourcePayload(BaseModel):
 
 DATASET_KIND_MAP = {
     "aer_st37": "wells",
+    "aer_general_well_data": "wells",
+    "aer_st102_facility_list": "facility_master",
+    "aer_spatial_pipelines": "pipelines",
+    "ami_crown_dispositions": "crown_dispositions",
+    "ami_crown_clients": "crown_clients",
+    "ami_crown_land_keys": "crown_land_keys",
+    "ami_crown_participants": "crown_participants",
     "aer_liability": "liability",
     "aer_spatial_data": "aer_spatial",
     "petrinex_public_monthly_production": "facility_production",

@@ -25,7 +25,10 @@ def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> p
                 LOGGER.warning("ST37 local live file did not contain a parseable TXT/CSV file: %s", local_path)
                 return pd.DataFrame()
             LOGGER.info("Using local live ST37 file: %s", local_path)
-            return _parse_well_table(target_path)
+            parsed = _parse_well_table(target_path)
+            if not parsed.empty:
+                parsed["source"] = source.key
+            return parsed
 
     artifact_url = (source.dataset_url or "").strip()
     discovered_artifact = False
@@ -61,7 +64,39 @@ def load_st37(downloader: Downloader, source: SourcePayload, refresh: bool) -> p
     if discovered_artifact:
         _cache_discovered_artifact_url(downloader, source.key, artifact_url)
         LOGGER.info("Parsed %s ST37 rows from discovered artifact", len(parsed.index))
+    if not parsed.empty:
+        parsed["source"] = source.key
     return parsed
+
+
+def load_general_well_data(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
+    return _load_aer_tabular_source(
+        downloader,
+        source,
+        refresh,
+        discovery_keywords=["general", "well", "data"],
+        parser=load_general_well_data_frame,
+    )
+
+
+def load_st102_facility_list(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
+    return _load_aer_tabular_source(
+        downloader,
+        source,
+        refresh,
+        discovery_keywords=["st102", "facility", "list"],
+        parser=load_st102_facility_list_frame,
+    )
+
+
+def load_spatial_pipelines(downloader: Downloader, source: SourcePayload, refresh: bool) -> pd.DataFrame:
+    return _load_aer_tabular_source(
+        downloader,
+        source,
+        refresh,
+        discovery_keywords=["pipeline"],
+        parser=load_spatial_pipelines_frame,
+    )
 
 
 def _discover_st37_from_landing_pages(downloader: Downloader, source: SourcePayload, refresh: bool) -> str | None:
@@ -170,9 +205,56 @@ def _discover_st37_artifact_url(landing_page_html: str, base_url: str) -> str | 
     return best_url
 
 
+def _discover_aer_artifact_url(landing_page_html: str, base_url: str, keywords: list[str]) -> str | None:
+    parser = _AnchorParser()
+    parser.feed(landing_page_html)
+    candidates: list[tuple[int, str]] = []
+    for href, text in parser.links:
+        raw_href = (href or "").strip()
+        if not raw_href:
+            continue
+        lowered_href = raw_href.lower()
+        if lowered_href.startswith("mailto:") or lowered_href.startswith("javascript:"):
+            continue
+
+        absolute_url = urljoin(base_url, raw_href)
+        absolute_lower = absolute_url.lower()
+        searchable = f"{text} {raw_href} {absolute_url}".lower()
+        if not any(keyword in searchable for keyword in keywords):
+            continue
+        if _is_rejected_aer_candidate(searchable):
+            continue
+        if not any(token in absolute_lower for token in [".csv", ".xlsx", ".xls", ".zip"]):
+            continue
+
+        score = 0
+        for keyword in keywords:
+            if keyword in searchable:
+                score += 5
+        if "all alberta" in searchable or "all-alberta" in searchable:
+            score += 8
+        if "report" in searchable:
+            score += 2
+        if absolute_lower.endswith(".xlsx") or absolute_lower.endswith(".xls"):
+            score += 4
+        if absolute_lower.endswith(".csv"):
+            score += 3
+        if absolute_lower.endswith(".zip"):
+            score += 2
+        candidates.append((score, absolute_url))
+
+    if not candidates:
+        return None
+
+    best_score, best_url = max(candidates, key=lambda item: item[0])
+    if best_score <= 0:
+        return None
+    return best_url
+
+
 def _guess_artifact_file_type(url: str, default_file_type: str) -> str:
     lowered = url.lower()
-    for token in ["zip", "txt", "csv", "html", "pdf"]:
+    for token in ["zip", "txt", "csv", "html", "pdf", "xlsx", "xls"]:
         if lowered.endswith(f".{token}"):
             return token
     return default_file_type
@@ -232,6 +314,68 @@ def load_liability(downloader: Downloader, source: SourcePayload, refresh: bool)
     out["deemed_liabilities"] = parsed.get(column_map.get("deemed_liabilities"), 0)
     out["ratio"] = parsed.get(column_map.get("ratio"), parsed.get(column_map.get("lmr"), 0))
     return out
+
+
+def _load_aer_tabular_source(
+    downloader: Downloader,
+    source: SourcePayload,
+    refresh: bool,
+    *,
+    discovery_keywords: list[str],
+    parser,
+) -> pd.DataFrame:
+    local_live_file = (source.local_live_file or "").strip()
+    if local_live_file:
+        local_path = Path(local_live_file).expanduser()
+        if local_path.exists() and local_path.is_file():
+            target_path = _resolve_tabular_artifact(local_path, extracted_dir=None)
+            if target_path is None:
+                LOGGER.warning("AER local live file did not contain a parseable tabular file: %s", local_path)
+                return pd.DataFrame()
+            parsed = parser(_read_tabular(target_path))
+            if not parsed.empty:
+                parsed["source"] = source.key
+            return parsed
+
+    artifact_url = (source.dataset_url or "").strip()
+    discovered_artifact = False
+
+    if not artifact_url and not refresh:
+        cached_url = _load_cached_discovered_artifact_url(downloader, source.key)
+        if cached_url and not _is_rejected_aer_candidate(cached_url.lower()):
+            artifact_url = cached_url
+
+    if not artifact_url and source.landing_page_url:
+        try:
+            landing_page = downloader.fetch(source.key, source.landing_page_url, refresh=refresh, file_type="html")
+            landing_page_html = landing_page.path.read_text(encoding="utf-8", errors="replace")
+            artifact_url = _discover_aer_artifact_url(landing_page_html, source.landing_page_url, discovery_keywords)
+            discovered_artifact = bool(artifact_url)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch/parse AER landing page %s: %s", source.landing_page_url, exc)
+
+    if not artifact_url:
+        LOGGER.warning("Unable to discover AER artifact URL for %s", source.key)
+        return pd.DataFrame()
+
+    result = downloader.fetch(
+        source.key,
+        artifact_url,
+        refresh=refresh,
+        file_type=_guess_artifact_file_type(artifact_url, source.file_type),
+        extract_zip=artifact_url.lower().endswith(".zip") or (source.file_type or "").lower() == "zip",
+    )
+    target_path = _resolve_tabular_artifact(result.path, result.extracted_dir)
+    if target_path is None:
+        LOGGER.warning("AER artifact did not contain a parseable table: %s", result.path)
+        return pd.DataFrame()
+
+    parsed = parser(target_path)
+    if discovered_artifact:
+        _cache_discovered_artifact_url(downloader, source.key, artifact_url)
+    if not parsed.empty:
+        parsed["source"] = source.key
+    return parsed
 
 
 def _parse_well_table(path: Path) -> pd.DataFrame:
@@ -375,6 +519,56 @@ def _resolve_st37_artifact(path: Path, extracted_dir: Path | None) -> Path | Non
             return None
 
     return None
+
+
+def _resolve_tabular_artifact(path: Path, extracted_dir: Path | None) -> Path | None:
+    if path.suffix.lower() in {".txt", ".csv", ".xlsx", ".xls", ".shp", ".dbf"} or _looks_like_excel_artifact(path):
+        return path
+
+    if path.suffix.lower() == ".zip" and extracted_dir and extracted_dir.exists():
+        files = sorted((p for p in extracted_dir.rglob("*") if p.is_file()), key=_tabular_candidate_priority)
+        return files[0] if files else None
+
+    return None
+
+
+def _is_rejected_aer_candidate(searchable: str) -> bool:
+    return any(token in searchable for token in ["greater than 9", "greater-than-9", "drilling event sequences"])
+
+
+def _looks_like_excel_artifact(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        return True
+    header = path.read_bytes()[:8]
+    if header.startswith(b"PK\x03\x04"):
+        try:
+            with ZipFile(path, "r") as archive:
+                return "[Content_Types].xml" in archive.namelist()
+        except (BadZipFile, OSError):
+            return False
+    return header.startswith(b"\xd0\xcf\x11\xe0")
+
+
+def _tabular_candidate_priority(path: Path) -> tuple[int, int, str]:
+    suffix = path.suffix.lower()
+    name = path.name.lower()
+    if suffix == ".shp" and "gcs" in name:
+        return (0, len(name), name)
+    if suffix == ".shp":
+        return (1, len(name), name)
+    if suffix == ".dbf" and "gcs" in name:
+        return (2, len(name), name)
+    if suffix == ".dbf":
+        return (3, len(name), name)
+    if suffix in {".xlsx", ".xls"}:
+        return (4, len(name), name)
+    if suffix in {".csv", ".txt"}:
+        return (5, len(name), name)
+    if _looks_like_excel_artifact(path):
+        return (6, len(name), name)
+    return (7, len(name), name)
 
 
 def _pick_best_zip_member(members: list[str]) -> str:
@@ -592,6 +786,223 @@ def _read_tabular(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix in {".csv", ".txt"}:
         return _read_delimited_fallback(path)
-    if suffix in {".xlsx", ".xls"}:
+    if suffix in {".xlsx", ".xls"} or _looks_like_excel_artifact(path):
         return pd.read_excel(path)
     return pd.DataFrame()
+
+
+def _column_as_series(df: pd.DataFrame, cols: dict[str, str], aliases: tuple[str, ...], default) -> pd.Series:
+    for alias in aliases:
+        normalized = _normalize_column_name(alias)
+        if normalized in cols:
+            return df[cols[normalized]]
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def _coerce_tabular_frame(source: pd.DataFrame | Path) -> pd.DataFrame:
+    if isinstance(source, Path):
+        return _read_tabular(source)
+    return source
+
+
+def load_general_well_data_frame(source: pd.DataFrame | Path) -> pd.DataFrame:
+    df = _coerce_tabular_frame(source)
+    if df.empty:
+        return pd.DataFrame()
+
+    cols = {_normalize_column_name(column): column for column in df.columns}
+    out = pd.DataFrame(index=df.index)
+    out["uwi"] = _column_as_series(df, cols, ("uwi", "well_id", "well identifier"), "")
+    out["status"] = _column_as_series(df, cols, ("current_status", "well_status", "status", "licence_status"), "UNKNOWN")
+    out["licensee"] = _column_as_series(df, cols, ("licensee_name", "licensee", "operator_name"), "")
+    out["license_number"] = _column_as_series(
+        df,
+        cols,
+        ("licence_number", "license_number", "licence_no", "license_no"),
+        "",
+    )
+    out["well_name"] = _column_as_series(df, cols, ("well_name",), "")
+    out["field_name"] = _column_as_series(df, cols, ("field_name", "field"), "")
+    out["pool_name"] = _column_as_series(df, cols, ("pool_name", "pool"), "")
+    out["spud_date"] = _column_as_series(df, cols, ("spud_date", "spud date"), None)
+    out["lsd"] = _column_as_series(df, cols, ("lsd", "legal_subdivision"), "")
+    out["section"] = _column_as_series(df, cols, ("section",), None)
+    out["township"] = _column_as_series(df, cols, ("township",), None)
+    out["range"] = _column_as_series(df, cols, ("range",), None)
+    out["meridian"] = _column_as_series(df, cols, ("meridian",), None)
+    out["lat"] = _column_as_series(df, cols, ("latitude", "lat"), None)
+    out["lon"] = _column_as_series(df, cols, ("longitude", "lon", "lng"), None)
+
+    return out[out["uwi"].fillna("").astype(str).str.strip() != ""].copy()
+
+
+def _read_st102_shapefile(path: Path) -> pd.DataFrame:
+    try:
+        import shapefile
+    except ImportError as exc:  # pragma: no cover - dependency managed in environment/tests
+        raise RuntimeError("pyshp is required to parse ST102 facility shapefiles") from exc
+
+    shp_path = path if path.suffix.lower() == ".shp" else path.with_suffix(".shp")
+    if not shp_path.exists():
+        return pd.DataFrame()
+
+    reader = shapefile.Reader(str(shp_path), encoding="utf-8")
+    records: list[dict[str, object]] = []
+    for shape_record in reader.iterShapeRecords():
+        row = shape_record.record.as_dict()
+        points = shape_record.shape.points
+        if points:
+            lon, lat = points[0][:2]
+            row["longitude"] = lon
+            row["latitude"] = lat
+        records.append(row)
+    return pd.DataFrame(records)
+
+
+def load_st102_facility_list_frame(source: pd.DataFrame | Path) -> pd.DataFrame:
+    if isinstance(source, Path) and source.suffix.lower() in {".shp", ".dbf"}:
+        df = _read_st102_shapefile(source)
+    else:
+        df = _coerce_tabular_frame(source)
+    if df.empty:
+        return pd.DataFrame()
+
+    cols = {_normalize_column_name(column): column for column in df.columns}
+    out = pd.DataFrame(index=df.index)
+    license_number = _column_as_series(
+        df,
+        cols,
+        ("licence_number", "license_number", "facility licence number", "lic_number"),
+        "",
+    )
+    out["facility_id"] = _column_as_series(
+        df,
+        cols,
+        ("facility_id", "facility_ba_id", "facility_ba_identifier", "fac_id"),
+        "",
+    )
+    out["facility_id"] = out["facility_id"].fillna("").astype(str)
+    empty_id = out["facility_id"].str.strip() == ""
+    out.loc[empty_id, "facility_id"] = license_number.fillna("").astype(str)[empty_id]
+    out["license_number"] = license_number
+    out["facility_name"] = _column_as_series(df, cols, ("facility_name", "fac_name"), "")
+    out["facility_type"] = _column_as_series(df, cols, ("facility_type", "edct_descr", "lic_type", "edct_type"), "")
+    out["facility_subtype"] = _column_as_series(
+        df,
+        cols,
+        ("facility_sub_type", "facility_subtype", "facility subtype", "fac_sub_ty", "sub_code"),
+        "",
+    )
+    out["facility_operator"] = _column_as_series(
+        df,
+        cols,
+        ("current_operator_name", "operator_name", "licensee_name", "facility_operator", "operator"),
+        "",
+    )
+    out["facility_status"] = _column_as_series(df, cols, ("facility_status", "status", "fac_status"), "")
+    out["lsd"] = _column_as_series(df, cols, ("lsd", "legal_subdivision"), "")
+    out["section"] = _column_as_series(df, cols, ("section",), None)
+    out["township"] = _column_as_series(df, cols, ("township",), None)
+    out["range"] = _column_as_series(df, cols, ("range",), None)
+    out["meridian"] = _column_as_series(df, cols, ("meridian",), None)
+    out["lat"] = _column_as_series(df, cols, ("latitude", "lat"), None)
+    out["lon"] = _column_as_series(df, cols, ("longitude", "lon", "lng"), None)
+
+    out["facility_id"] = out["facility_id"].fillna("").astype(str).str.strip()
+    return out[out["facility_id"] != ""].copy()
+
+
+def _legacy_load_spatial_pipelines_frame(source: pd.DataFrame | Path) -> pd.DataFrame:
+    if isinstance(source, Path) and source.suffix.lower() in {".shp", ".dbf"}:
+        df = _read_pipeline_shapefile(source)
+    else:
+        df = _coerce_tabular_frame(source)
+    if df.empty:
+        return pd.DataFrame()
+
+    cols = {_normalize_column_name(column): column for column in df.columns}
+    out = pd.DataFrame(index=df.index)
+    out["pipeline_id"] = _column_as_series(df, cols, ("pipeline_licence_segment_id", "pllicsegid"), "")
+    out["license_number"] = _column_as_series(df, cols, ("licence_number", "license_number", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "lic_no", "licence", "licence_no", "licence_number", "licence_number", "lic_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "lic_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "lic_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "lic_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "lic_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "licence_no", "lic_no"), "")
+    out["line_number"] = _column_as_series(df, cols, ("segment_line_number", "line_no"), "")
+    out["licence_line_number"] = _column_as_series(df, cols, ("licence_line_number", "lic_li_no"), "")
+    out["company_name"] = _column_as_series(df, cols, ("company_name", "comp_name"), "")
+    out["ba_code"] = _column_as_series(df, cols, ("ba_code",), "")
+    out["segment_status"] = _column_as_series(df, cols, ("segment_status", "seg_status"), "")
+    out["from_facility_type"] = _column_as_series(df, cols, ("segment_from_facility", "from_fac", "from_facility"), "")
+    out["from_location"] = _column_as_series(df, cols, ("from_location", "from_loc"), "")
+    out["to_facility_type"] = _column_as_series(df, cols, ("segment_to_facility", "to_fac", "to_facility"), "")
+    out["to_location"] = _column_as_series(df, cols, ("to_location", "to_loc"), "")
+    out["substance1"] = _column_as_series(df, cols, ("substance_1", "substance1"), "")
+    out["substance2"] = _column_as_series(df, cols, ("substance_2", "substance2"), "")
+    out["substance3"] = _column_as_series(df, cols, ("substance_3", "substance3"), "")
+    out["segment_length_km"] = _column_as_series(df, cols, ("segment_length", "seg_length"), None)
+    out["geometry_source"] = _column_as_series(df, cols, ("geometry_source", "geom_srce"), "")
+    out["centroid_lat"] = _column_as_series(df, cols, ("centroid_lat",), None)
+    out["centroid_lon"] = _column_as_series(df, cols, ("centroid_lon",), None)
+
+    out["pipeline_id"] = out["pipeline_id"].fillna("").astype(str).str.strip()
+    return out[out["pipeline_id"] != ""].copy()
+
+
+def _read_pipeline_shapefile(path: Path) -> pd.DataFrame:
+    try:
+        import shapefile
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("pyshp is required to parse AER pipeline shapefiles") from exc
+
+    shp_path = path if path.suffix.lower() == ".shp" else path.with_suffix(".shp")
+    if not shp_path.exists():
+        return pd.DataFrame()
+
+    reader = shapefile.Reader(str(shp_path), encoding="utf-8")
+    records: list[dict[str, object]] = []
+    for idx in range(reader.numRecords):
+        row = reader.record(idx).as_dict()
+        shape = reader.shape(idx)
+        points = shape.points
+        if points:
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            row["centroid_lon"] = (min(xs) + max(xs)) / 2.0
+            row["centroid_lat"] = (min(ys) + max(ys)) / 2.0
+        records.append(row)
+    return pd.DataFrame(records)
+
+
+def load_spatial_pipelines_frame(source: pd.DataFrame | Path) -> pd.DataFrame:
+    if isinstance(source, Path) and source.suffix.lower() in {".shp", ".dbf"}:
+        df = _read_pipeline_shapefile(source)
+    else:
+        df = _coerce_tabular_frame(source)
+    if df.empty:
+        return pd.DataFrame()
+
+    cols = {_normalize_column_name(column): column for column in df.columns}
+    out = pd.DataFrame(index=df.index)
+    out["pipeline_id"] = _column_as_series(df, cols, ("pipeline_licence_segment_id", "pllicsegid"), "")
+    out["license_number"] = _column_as_series(
+        df,
+        cols,
+        ("licence_number", "license_number", "licence_no", "lic_no", "licence"),
+        "",
+    )
+    out["line_number"] = _column_as_series(df, cols, ("segment_line_number", "line_no"), "")
+    out["licence_line_number"] = _column_as_series(df, cols, ("licence_line_number", "lic_li_no"), "")
+    out["company_name"] = _column_as_series(df, cols, ("company_name", "comp_name"), "")
+    out["ba_code"] = _column_as_series(df, cols, ("ba_code",), "")
+    out["segment_status"] = _column_as_series(df, cols, ("segment_status", "seg_status"), "")
+    out["from_facility_type"] = _column_as_series(df, cols, ("segment_from_facility", "from_fac", "from_facility"), "")
+    out["from_location"] = _column_as_series(df, cols, ("from_location", "from_loc"), "")
+    out["to_facility_type"] = _column_as_series(df, cols, ("segment_to_facility", "to_fac", "to_facility"), "")
+    out["to_location"] = _column_as_series(df, cols, ("to_location", "to_loc"), "")
+    out["substance1"] = _column_as_series(df, cols, ("substance_1", "substance1"), "")
+    out["substance2"] = _column_as_series(df, cols, ("substance_2", "substance2"), "")
+    out["substance3"] = _column_as_series(df, cols, ("substance_3", "substance3"), "")
+    out["segment_length_km"] = _column_as_series(df, cols, ("segment_length", "seg_length"), None)
+    out["geometry_source"] = _column_as_series(df, cols, ("geometry_source", "geom_srce"), "")
+    out["centroid_lat"] = _column_as_series(df, cols, ("centroid_lat",), None)
+    out["centroid_lon"] = _column_as_series(df, cols, ("centroid_lon",), None)
+
+    out["pipeline_id"] = out["pipeline_id"].fillna("").astype(str).str.strip()
+    return out[out["pipeline_id"] != ""].copy()

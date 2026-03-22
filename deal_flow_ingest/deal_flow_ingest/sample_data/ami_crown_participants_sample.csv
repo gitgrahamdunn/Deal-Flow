@@ -1,0 +1,3 @@
+disposition_id,client_id,role_type,interest_pct,effective_from
+DISP-1001,100001,holder,100,2020-01-01
+DISP-2001,100002,holder,100,2021-06-01

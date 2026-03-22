@@ -7,6 +7,7 @@ import pandas as pd
 import yaml
 
 from deal_flow_ingest.cli import run_ingestion
+from deal_flow_ingest.services.pipeline import prepare_production_dfs
 
 
 def _count_rows(db_path: Path, table: str) -> int:
@@ -53,7 +54,7 @@ def test_pipeline_live_mode_optional_sources_empty_succeeds(tmp_path: Path, monk
     def _empty_dataset(*_args, **_kwargs):
         return pd.DataFrame()
 
-    monkeypatch.setattr("deal_flow_ingest.deal_flow_ingest.services.pipeline.load_dataset", _empty_dataset)
+    monkeypatch.setattr("deal_flow_ingest.services.pipeline.load_dataset", _empty_dataset)
 
     args = Namespace(
         start=None,
@@ -103,7 +104,7 @@ def test_pipeline_live_mode_required_source_empty_fails(tmp_path: Path, monkeypa
     def _empty_dataset(*_args, **_kwargs):
         return pd.DataFrame()
 
-    monkeypatch.setattr("deal_flow_ingest.deal_flow_ingest.services.pipeline.load_dataset", _empty_dataset)
+    monkeypatch.setattr("deal_flow_ingest.services.pipeline.load_dataset", _empty_dataset)
 
     args = Namespace(
         start=None,
@@ -115,3 +116,24 @@ def test_pipeline_live_mode_required_source_empty_fails(tmp_path: Path, monkeypa
 
     assert run_ingestion(args) == 1
     assert _latest_ingestion_status(db_path) == "failed"
+
+
+def test_prepare_production_dfs_normalizes_missing_well_status() -> None:
+    wells_df = pd.DataFrame(
+        {
+            "well_id": ["100011100100W400", "100011100200W400"],
+            "status": [None, ""],
+            "licensee_operator_id": [None, None],
+        }
+    )
+
+    _, _, status_df, _ = prepare_production_dfs(
+        frames_by_kind={},
+        bridge_df=pd.DataFrame(),
+        wells_df=wells_df,
+        fac_df=pd.DataFrame(),
+        start=pd.Timestamp("2025-01-01").date(),
+        end=pd.Timestamp("2025-12-31").date(),
+    )
+
+    assert status_df["status"].tolist() == ["UNKNOWN", "UNKNOWN"]

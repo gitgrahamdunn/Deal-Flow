@@ -69,8 +69,13 @@ class DimWell(TimestampMixin, Base):
 
     well_id: Mapped[str] = mapped_column(Text, primary_key=True)
     uwi_raw: Mapped[str | None] = mapped_column(Text)
+    license_number: Mapped[str | None] = mapped_column(Text)
+    well_name: Mapped[str | None] = mapped_column(Text)
+    field_name: Mapped[str | None] = mapped_column(Text)
+    pool_name: Mapped[str | None] = mapped_column(Text)
     licensee_operator_id: Mapped[int | None] = mapped_column(ForeignKey("dim_operator.operator_id"), nullable=True)
     status: Mapped[str | None] = mapped_column(Text)
+    spud_date: Mapped[datetime | None] = mapped_column(Date)
     lsd: Mapped[str | None] = mapped_column(Text)
     section: Mapped[int | None] = mapped_column(Integer)
     township: Mapped[int | None] = mapped_column(Integer)
@@ -87,8 +92,12 @@ class DimFacility(TimestampMixin, Base):
     __tablename__ = "dim_facility"
 
     facility_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    facility_name: Mapped[str | None] = mapped_column(Text)
+    license_number: Mapped[str | None] = mapped_column(Text)
     facility_type: Mapped[str | None] = mapped_column(Text)
+    facility_subtype: Mapped[str | None] = mapped_column(Text)
     facility_operator_id: Mapped[int | None] = mapped_column(ForeignKey("dim_operator.operator_id"), nullable=True)
+    facility_status: Mapped[str | None] = mapped_column(Text)
     lsd: Mapped[str | None] = mapped_column(Text)
     section: Mapped[int | None] = mapped_column(Integer)
     township: Mapped[int | None] = mapped_column(Integer)
@@ -96,6 +105,96 @@ class DimFacility(TimestampMixin, Base):
     meridian: Mapped[int | None] = mapped_column(Integer)
     lat: Mapped[float | None] = mapped_column(Float)
     lon: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str | None] = mapped_column(Text)
+
+
+class DimPipeline(TimestampMixin, Base):
+    __tablename__ = "dim_pipeline"
+
+    pipeline_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    license_number: Mapped[str | None] = mapped_column(Text)
+    line_number: Mapped[str | None] = mapped_column(Text)
+    licence_line_number: Mapped[str | None] = mapped_column(Text, index=True)
+    operator_id: Mapped[int | None] = mapped_column(ForeignKey("dim_operator.operator_id"), nullable=True)
+    company_name: Mapped[str | None] = mapped_column(Text)
+    ba_code: Mapped[str | None] = mapped_column(Text)
+    segment_status: Mapped[str | None] = mapped_column(Text)
+    from_facility_type: Mapped[str | None] = mapped_column(Text)
+    from_location: Mapped[str | None] = mapped_column(Text)
+    to_facility_type: Mapped[str | None] = mapped_column(Text)
+    to_location: Mapped[str | None] = mapped_column(Text)
+    substance1: Mapped[str | None] = mapped_column(Text)
+    substance2: Mapped[str | None] = mapped_column(Text)
+    substance3: Mapped[str | None] = mapped_column(Text)
+    segment_length_km: Mapped[float | None] = mapped_column(Float)
+    geometry_source: Mapped[str | None] = mapped_column(Text)
+    centroid_lat: Mapped[float | None] = mapped_column(Float)
+    centroid_lon: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str | None] = mapped_column(Text)
+
+
+class DimCrownDisposition(TimestampMixin, Base):
+    __tablename__ = "dim_crown_disposition"
+
+    disposition_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    agreement_no: Mapped[str | None] = mapped_column(Text, index=True)
+    disposition_type: Mapped[str | None] = mapped_column(Text)
+    disposition_status: Mapped[str | None] = mapped_column(Text)
+    effective_from: Mapped[datetime | None] = mapped_column(Date)
+    effective_to: Mapped[datetime | None] = mapped_column(Date)
+    source: Mapped[str | None] = mapped_column(Text)
+
+
+class DimCrownClient(TimestampMixin, Base):
+    __tablename__ = "dim_crown_client"
+
+    client_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    client_name_raw: Mapped[str | None] = mapped_column(Text)
+    client_name_norm: Mapped[str | None] = mapped_column(Text, index=True)
+    source_first_seen: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_last_seen: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BridgeCrownDispositionClient(TimestampMixin, Base):
+    __tablename__ = "bridge_crown_disposition_client"
+    __table_args__ = (
+        UniqueConstraint("disposition_id", "client_id", "role_type", name="uq_bridge_crown_disposition_client"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    disposition_id: Mapped[str] = mapped_column(ForeignKey("dim_crown_disposition.disposition_id"), nullable=False)
+    client_id: Mapped[str] = mapped_column(ForeignKey("dim_crown_client.client_id"), nullable=False)
+    role_type: Mapped[str] = mapped_column(Text, nullable=False, default="holder", server_default="holder")
+    interest_pct: Mapped[float | None] = mapped_column(Float)
+    effective_from: Mapped[datetime | None] = mapped_column(Date)
+    effective_to: Mapped[datetime | None] = mapped_column(Date)
+    source: Mapped[str | None] = mapped_column(Text)
+
+
+class BridgeCrownDispositionLand(TimestampMixin, Base):
+    __tablename__ = "bridge_crown_disposition_land"
+    __table_args__ = (
+        UniqueConstraint(
+            "disposition_id",
+            "meridian",
+            "range",
+            "township",
+            "section",
+            "lsd",
+            "tract_no",
+            name="uq_bridge_crown_disposition_land",
+        ),
+        Index("ix_bridge_crown_disposition_land_ats", "meridian", "range", "township", "section", "lsd"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    disposition_id: Mapped[str] = mapped_column(ForeignKey("dim_crown_disposition.disposition_id"), nullable=False)
+    tract_no: Mapped[str | None] = mapped_column(Text)
+    lsd: Mapped[str | None] = mapped_column(Text)
+    section: Mapped[int] = mapped_column(Integer, nullable=False)
+    township: Mapped[int] = mapped_column(Integer, nullable=False)
+    range: Mapped[int] = mapped_column(Integer, nullable=False)
+    meridian: Mapped[int] = mapped_column(Integer, nullable=False)
     source: Mapped[str | None] = mapped_column(Text)
 
 

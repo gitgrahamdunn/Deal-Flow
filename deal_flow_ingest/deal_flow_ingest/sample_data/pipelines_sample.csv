@@ -1,0 +1,2 @@
+pipeline_id,license_number,line_number,licence_line_number,company_name,ba_code,segment_status,from_facility_type,from_location,to_facility_type,to_location,substance1,substance2,substance3,segment_length_km,geometry_source,centroid_lat,centroid_lon,source
+51822,11130,1,11130-1,ATCO Gas And Pipelines Ltd.,0144,Operating,Regulator Station,16-33-044-24W4,Regulator Station,04-06-045-24W4,Natural gas,,,10.27,Mapping,52.865238,-113.451237,aer_spatial_pipelines

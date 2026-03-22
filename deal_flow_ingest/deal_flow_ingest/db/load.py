@@ -11,11 +11,16 @@ from sqlalchemy import bindparam, delete, insert, select, tuple_, update
 from sqlalchemy.engine import Connection
 
 from deal_flow_ingest.db.schema import (
+    BridgeCrownDispositionClient,
+    BridgeCrownDispositionLand,
     BridgeOperatorBusinessAssociate,
     BridgeWellFacility,
     DimBusinessAssociate,
+    DimCrownClient,
+    DimCrownDisposition,
     DimFacility,
     DimOperator,
+    DimPipeline,
     DimWell,
     FactFacilityProductionMonthly,
     FactOperatorLiability,
@@ -159,6 +164,8 @@ def _dedupe_wells_df(df: pd.DataFrame) -> pd.DataFrame:
     score = status_non_empty.astype(int) + licensee_present.astype(int)
     for column in ["lsd", "section", "township", "range", "meridian"]:
         score += (working[column].notna().astype(int) if column in working.columns else 0)
+    for column in ["license_number", "well_name", "field_name", "pool_name", "spud_date"]:
+        score += (working[column].notna().astype(int) if column in working.columns else 0)
 
     has_lat_lon = (
         working[[c for c in ["lat", "lon"] if c in working.columns]].notna().any(axis=1).astype(int)
@@ -274,6 +281,7 @@ def upsert_dim_well(conn: Connection, wells_df: pd.DataFrame) -> int:
         return 0
 
     deduped_wells_df = _dedupe_wells_df(wells_df)
+    deduped_wells_df = deduped_wells_df.astype(object).where(pd.notnull(deduped_wells_df), None)
     duplicates_collapsed = len(wells_df) - len(deduped_wells_df)
     if duplicates_collapsed > 0:
         logger.info("Collapsed %s duplicate dim_well rows by well_id before upsert", duplicates_collapsed)
@@ -291,14 +299,97 @@ def upsert_dim_well(conn: Connection, wells_df: pd.DataFrame) -> int:
 def upsert_dim_facility(conn: Connection, fac_df: pd.DataFrame) -> int:
     if fac_df.empty:
         return 0
-    keys = fac_df["facility_id"].dropna().astype(str).unique().tolist()
+    cleaned_fac_df = fac_df.astype(object).where(pd.notnull(fac_df), None)
+    keys = cleaned_fac_df["facility_id"].dropna().astype(str).unique().tolist()
     existing = _fetch_existing_values_in_chunks(conn, DimFacility.facility_id, keys)
-    inserts = fac_df[~fac_df["facility_id"].isin(existing)].to_dict(orient="records")
-    updates = fac_df[fac_df["facility_id"].isin(existing)].to_dict(orient="records")
+    inserts = cleaned_fac_df[~cleaned_fac_df["facility_id"].isin(existing)].to_dict(orient="records")
+    updates = cleaned_fac_df[cleaned_fac_df["facility_id"].isin(existing)].to_dict(orient="records")
     if inserts:
         _execute_insert_in_chunks(conn, DimFacility, inserts, "dim_facility")
     _execute_update_in_chunks(conn, DimFacility, "facility_id", updates, "dim_facility")
     return len(inserts) + len(updates)
+
+
+def upsert_dim_pipeline(conn: Connection, pipeline_df: pd.DataFrame) -> int:
+    if pipeline_df.empty:
+        return 0
+    cleaned_pipeline_df = pipeline_df.astype(object).where(pd.notnull(pipeline_df), None)
+    keys = cleaned_pipeline_df["pipeline_id"].dropna().astype(str).unique().tolist()
+    existing = _fetch_existing_values_in_chunks(conn, DimPipeline.pipeline_id, keys)
+    inserts = cleaned_pipeline_df[~cleaned_pipeline_df["pipeline_id"].isin(existing)].to_dict(orient="records")
+    updates = cleaned_pipeline_df[cleaned_pipeline_df["pipeline_id"].isin(existing)].to_dict(orient="records")
+    if inserts:
+        _execute_insert_in_chunks(conn, DimPipeline, inserts, "dim_pipeline")
+    _execute_update_in_chunks(conn, DimPipeline, "pipeline_id", updates, "dim_pipeline")
+    return len(inserts) + len(updates)
+
+
+def upsert_dim_crown_disposition(conn: Connection, df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    cleaned = df.astype(object).where(pd.notnull(df), None)
+    keys = cleaned["disposition_id"].dropna().astype(str).unique().tolist()
+    existing = _fetch_existing_values_in_chunks(conn, DimCrownDisposition.disposition_id, keys)
+    inserts = cleaned[~cleaned["disposition_id"].isin(existing)].to_dict(orient="records")
+    updates = cleaned[cleaned["disposition_id"].isin(existing)].to_dict(orient="records")
+    if inserts:
+        _execute_insert_in_chunks(conn, DimCrownDisposition, inserts, "dim_crown_disposition")
+    _execute_update_in_chunks(conn, DimCrownDisposition, "disposition_id", updates, "dim_crown_disposition")
+    return len(inserts) + len(updates)
+
+
+def upsert_dim_crown_client(conn: Connection, df: pd.DataFrame, source: str) -> int:
+    if df.empty:
+        return 0
+
+    working = df.copy()
+    working["client_id"] = working.get("client_id", "").fillna("").astype(str).str.strip()
+    working["client_name_raw"] = working.get("client_name_raw", pd.Series([None] * len(working), index=working.index))
+    working["client_name_norm"] = working.get("client_name_norm", pd.Series([None] * len(working), index=working.index))
+    working = working[working["client_id"] != ""].drop_duplicates(subset=["client_id"], keep="last")
+    if working.empty:
+        return 0
+
+    cleaned = working.astype(object).where(pd.notnull(working), None)
+    keys = cleaned["client_id"].dropna().astype(str).unique().tolist()
+    existing = _fetch_existing_values_in_chunks(conn, DimCrownClient.client_id, keys)
+    inserts: list[dict] = []
+    updates: list[dict] = []
+    for row in cleaned.to_dict(orient="records"):
+        payload = {
+            "client_id": row["client_id"],
+            "client_name_raw": row.get("client_name_raw"),
+            "client_name_norm": row.get("client_name_norm"),
+            "source_last_seen": source,
+        }
+        if row["client_id"] in existing:
+            updates.append(payload)
+        else:
+            payload["source_first_seen"] = source
+            inserts.append(payload)
+
+    if inserts:
+        _execute_insert_in_chunks(conn, DimCrownClient, inserts, "dim_crown_client")
+    _execute_update_in_chunks(conn, DimCrownClient, "client_id", updates, "dim_crown_client")
+    return len(inserts) + len(updates)
+
+
+def replace_bridge_crown_disposition_client(conn: Connection, df: pd.DataFrame) -> int:
+    conn.execute(delete(BridgeCrownDispositionClient))
+    if df.empty:
+        return 0
+    cleaned = df.astype(object).where(pd.notnull(df), None)
+    payload = cleaned.to_dict(orient="records")
+    return _execute_insert_in_chunks(conn, BridgeCrownDispositionClient, payload, "bridge_crown_disposition_client")
+
+
+def replace_bridge_crown_disposition_land(conn: Connection, df: pd.DataFrame) -> int:
+    conn.execute(delete(BridgeCrownDispositionLand))
+    if df.empty:
+        return 0
+    cleaned = df.astype(object).where(pd.notnull(df), None)
+    payload = cleaned.to_dict(orient="records")
+    return _execute_insert_in_chunks(conn, BridgeCrownDispositionLand, payload, "bridge_crown_disposition_land")
 
 
 def load_bridge_well_facility(conn: Connection, bridge_df: pd.DataFrame) -> int:
@@ -374,7 +465,8 @@ def replace_fact_well_status(conn: Connection, df: pd.DataFrame, source: str) ->
     if df.empty:
         return 0
     conn.execute(delete(FactWellStatus).where(FactWellStatus.source == source))
-    payload = df.to_dict(orient="records")
+    cleaned = df.astype(object).where(pd.notnull(df), None)
+    payload = cleaned.to_dict(orient="records")
     return _execute_insert_in_chunks(conn, FactWellStatus, payload, FactWellStatus.__tablename__)
 
 

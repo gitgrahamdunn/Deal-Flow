@@ -99,3 +99,33 @@ def test_apply_saved_sql_builds_curated_views(tmp_path: Path):
     assert theses[0]
     assert theses[1] in {"HIGH", "MEDIUM", "LOW"}
     assert float(theses[2]) >= 0
+
+    registry_well = _fetch_one(
+        db_path,
+        "select well_id, license_number, well_name, field_name from asset_registry_wells order by well_id limit 1",
+    )
+    assert registry_well is not None
+    assert registry_well[0]
+    assert registry_well[1]
+    assert registry_well[2]
+    assert registry_well[3]
+
+    registry_facility = _fetch_one(
+        db_path,
+        "select facility_id, facility_name, license_number, facility_subtype from asset_registry_facilities order by facility_id limit 1",
+    )
+    assert registry_facility is not None
+    assert registry_facility[0]
+    assert registry_facility[1]
+    assert registry_facility[2]
+    assert registry_facility[3]
+
+    registry_pipeline = _fetch_one(
+        db_path,
+        "select pipeline_id, license_number, company_name, segment_status from asset_registry_pipelines order by pipeline_id limit 1",
+    )
+    assert registry_pipeline is not None
+    assert registry_pipeline[0]
+    assert registry_pipeline[1]
+    assert registry_pipeline[2]
+    assert registry_pipeline[3]

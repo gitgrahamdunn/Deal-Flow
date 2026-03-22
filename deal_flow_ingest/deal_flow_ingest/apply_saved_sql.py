@@ -16,6 +16,10 @@ SQL_FILES = (
     Path("sql/views/operator_area_footprints.sql"),
     Path("sql/views/deal_flow_opportunities.sql"),
     Path("sql/views/seller_theses.sql"),
+    Path("sql/views/asset_registry_wells.sql"),
+    Path("sql/views/asset_registry_facilities.sql"),
+    Path("sql/views/asset_registry_pipelines.sql"),
+    Path("sql/views/asset_registry_crown_tenure.sql"),
 )
 
 

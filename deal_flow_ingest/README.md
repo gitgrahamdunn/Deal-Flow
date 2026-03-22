@@ -116,8 +116,10 @@ Source dataset routing is composable: connectors now feed `dict[str, list[pd.Dat
 ## Source discovery flow
 
 - **AER ST37**: local file override → configured artifact URL → discovered URL from configured landing pages; discovered URLs are cached in source metadata.
+- **AER general well / ST102 facility list**: landing-page discovery prefers tabular artifacts (`xlsx/csv/zip`) and enriches canonical well/facility registry rows with licence, naming, and lifecycle fields.
 - **ST37 parsing**: parser mode is logged (`delimited` vs `fixed_width`), malformed-row counts are logged, and fixed-width licensee extraction now requires confidence (otherwise left blank).
 - **Petrinex**: discovery now excludes PDFs for tabular loaders; discovery only accepts likely machine-readable artifacts (`csv/xls/xlsx/zip`) and supports alternate landing pages.
+- **AMI Crown tenure**: current support is local-file-backed only. The repo can ingest user-supplied AMI CSV extracts for Crown dispositions, clients, land keys, and participants, but it does not claim anonymous live download support.
 
 ## SQLite vs Postgres guidance
 
@@ -144,6 +146,10 @@ Current curated SQL views:
 - `operator_area_footprints`: operator-level concentration summaries showing core vs scattered footprints.
 - `deal_flow_opportunities`: operator opportunity ranking built on `deal_flow_targets`.
 - `seller_theses`: analyst-facing combined seller ranking built from targets, opportunities, packages, and footprints.
+- `asset_registry_wells`: canonical well registry combining ST37, AER general well attributes, production rollup, and restart metadata.
+- `asset_registry_facilities`: canonical facility registry combining Petrinex infrastructure, ST102 metadata, linked well counts, and production rollup.
+- `asset_registry_pipelines`: canonical pipeline-segment registry combining AER spatial pipeline attributes with mapped operators.
+- `asset_registry_crown_tenure`: asset-to-Crown-disposition matches for wells and facilities using exact ATS legal-location keys.
 
 ## Reset command behavior
 
@@ -153,12 +159,15 @@ Current curated SQL views:
 
 ## What is real vs placeholder today
 
-- **Real/live today**: ST37 artifact discovery + parsing + ingestion, Petrinex business associate/facility/bridge/monthly production public API ingestion, SQLite/Postgres-compatible loaders, metrics/restart/opportunity outputs.
+- **Real/live today**: ST37 artifact discovery + parsing + ingestion, AER general well and ST102 facility-list enrichment, AER pipeline spatial ingestion, Petrinex business associate/facility/bridge/monthly production public API ingestion, SQLite/Postgres-compatible loaders, registry views, and metrics/restart/opportunity outputs.
+- **Local-file working today**: AMI Crown disposition tenure ingestion for user-supplied extract files, including client/holder and ATS land-key joins into a curated tenure view.
 - **Prepared but not fully wired for production**: liability and spatial source coverage remain disabled by default until direct public artifacts are wired.
 
 ## Known limitations
 
 - Facility-to-well production remains equal-allocation estimation (`is_estimated=true`) until higher-fidelity allocation inputs are wired.
 - Restart and distress metrics are screening heuristics, not engineering/economic forecasts.
-- AER liability and spatial connectors are not yet enabled for default live runs because public artifact wiring is incomplete.
+- ST102 and general-well-data joins currently enrich canonical wells/facilities by shared identifiers only; broader licence-to-asset reconciliation is still a follow-on step.
+- AMI tenure support is Crown-only context and is not working-interest ownership. Freehold mineral title and WI remain out of scope unless private source documents are supplied.
+- AER liability and broader non-pipeline spatial connectors are not yet enabled for default live runs because public artifact wiring is incomplete.
 - Open Alberta connector remains a placeholder.

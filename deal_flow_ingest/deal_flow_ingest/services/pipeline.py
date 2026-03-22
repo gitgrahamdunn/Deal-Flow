@@ -18,6 +18,8 @@ from deal_flow_ingest.db.load import (
     load_bridge_well_facility,
     new_run_id,
     record_ingestion_run,
+    replace_bridge_crown_disposition_client,
+    replace_bridge_crown_disposition_land,
     replace_fact_by_month_range,
     replace_fact_liability,
     replace_fact_metrics,
@@ -27,13 +29,19 @@ from deal_flow_ingest.db.load import (
     upsert_bridge_operator_business_associate,
     _dedupe_wells_df,
     upsert_dim_business_associate,
+    upsert_dim_crown_client,
+    upsert_dim_crown_disposition,
     upsert_dim_facility,
     upsert_dim_operator,
+    upsert_dim_pipeline,
     upsert_dim_well,
 )
 from deal_flow_ingest.db.migrate import upgrade_to_head
 from deal_flow_ingest.db.schema import (
     DimOperator,
+    DimCrownClient,
+    DimCrownDisposition,
+    DimPipeline,
     DimWell,
     FactFacilityProductionMonthly,
     FactOperatorLiability,
@@ -47,7 +55,7 @@ from deal_flow_ingest.db.schema import (
 from deal_flow_ingest.io.downloader import Downloader
 from deal_flow_ingest.sources import load_dataset
 from deal_flow_ingest.transform.metrics import compute_operator_metrics, compute_well_restart_scores, empty_restart_scores_df
-from deal_flow_ingest.transform.normalize import month_start, normalize_operator_name, normalize_uwi
+from deal_flow_ingest.transform.normalize import month_start, normalize_lsd, normalize_operator_name, normalize_uwi
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,8 +91,13 @@ def _phase(name: str, rows_getter=None) -> _PhaseLogger:
 WELL_DIM_COLUMNS = [
     "well_id",
     "uwi_raw",
+    "license_number",
+    "well_name",
+    "field_name",
+    "pool_name",
     "status",
     "licensee_operator_id",
+    "spud_date",
     "lsd",
     "section",
     "township",
@@ -94,6 +107,45 @@ WELL_DIM_COLUMNS = [
     "lon",
     "first_seen",
     "last_seen",
+    "source",
+]
+FACILITY_DIM_COLUMNS = [
+    "facility_id",
+    "facility_name",
+    "license_number",
+    "facility_type",
+    "facility_subtype",
+    "facility_operator_id",
+    "facility_status",
+    "lsd",
+    "section",
+    "township",
+    "range",
+    "meridian",
+    "lat",
+    "lon",
+    "source",
+]
+PIPELINE_DIM_COLUMNS = [
+    "pipeline_id",
+    "license_number",
+    "line_number",
+    "licence_line_number",
+    "operator_id",
+    "company_name",
+    "ba_code",
+    "segment_status",
+    "from_facility_type",
+    "from_location",
+    "to_facility_type",
+    "to_location",
+    "substance1",
+    "substance2",
+    "substance3",
+    "segment_length_km",
+    "geometry_source",
+    "centroid_lat",
+    "centroid_lon",
     "source",
 ]
 WELL_STATUS_COLUMNS = ["well_id", "status", "status_date", "source"]
@@ -111,6 +163,26 @@ LIABILITY_COLUMNS = [
     "ratio",
     "source",
 ]
+CROWN_DISPOSITION_COLUMNS = [
+    "disposition_id",
+    "agreement_no",
+    "disposition_type",
+    "disposition_status",
+    "effective_from",
+    "effective_to",
+    "source",
+]
+CROWN_CLIENT_COLUMNS = ["client_id", "client_name_raw", "client_name_norm"]
+CROWN_PARTICIPANT_COLUMNS = [
+    "disposition_id",
+    "client_id",
+    "role_type",
+    "interest_pct",
+    "effective_from",
+    "effective_to",
+    "source",
+]
+CROWN_LAND_COLUMNS = ["disposition_id", "tract_no", "lsd", "section", "township", "range", "meridian", "source"]
 
 
 @dataclass
@@ -252,9 +324,12 @@ def _collect_database_validation(conn) -> dict[str, Any]:
     table_counts = {
         "dim_operator": int(conn.execute(select(func.count()).select_from(DimOperator)).scalar_one()),
         "dim_well": int(conn.execute(select(func.count()).select_from(DimWell)).scalar_one()),
+        "dim_crown_disposition": int(conn.execute(select(func.count()).select_from(DimCrownDisposition)).scalar_one()),
+        "dim_crown_client": int(conn.execute(select(func.count()).select_from(DimCrownClient)).scalar_one()),
         "fact_facility_production_monthly": int(
             conn.execute(select(func.count()).select_from(FactFacilityProductionMonthly)).scalar_one()
         ),
+        "dim_pipeline": int(conn.execute(select(func.count()).select_from(DimPipeline)).scalar_one()),
         "fact_well_production_monthly": int(
             conn.execute(select(func.count()).select_from(FactWellProductionMonthly)).scalar_one()
         ),
@@ -387,14 +462,54 @@ def _merge_kind_frames(frames_by_kind: dict[str, list[pd.DataFrame]], kind: str)
     return pd.concat(frames, ignore_index=True)
 
 
+def _first_non_empty(series: pd.Series):
+    for value in series:
+        if pd.isna(value):
+            continue
+        if isinstance(value, str) and value.strip() == "":
+            continue
+        return value
+    return None
+
+
+def _coalesce_rows_by_key(df: pd.DataFrame, key: str, columns: list[str]) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = df.copy()
+    working[key] = working[key].fillna("").astype(str).str.strip()
+    working = working[working[key] != ""]
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = (
+        working.groupby(key, dropna=False, sort=False)
+        .agg({column: _first_non_empty for column in columns if column != key})
+        .reset_index()
+    )
+    return grouped.reindex(columns=columns)
+
+
+def _stringify_identifier(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _normalize_status_series(values, *, default: str = "UNKNOWN") -> pd.Series:
+    series = values if isinstance(values, pd.Series) else pd.Series(values)
+    normalized = series.fillna(default).astype(str).str.strip()
+    return normalized.replace({"": default, "nan": default, "None": default, "NONE": default})
+
+
 def prepare_operator_dim_inputs(frames_by_kind: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
     wells = _merge_kind_frames(frames_by_kind, "wells")
     facilities = _merge_kind_frames(frames_by_kind, "facility_master")
     operators = _merge_kind_frames(frames_by_kind, "operators")
     liability = _merge_kind_frames(frames_by_kind, "liability")
-    well_licensees = pd.Series(dtype=str)
-    if operators.empty and facilities.empty:
-        well_licensees = wells.get("licensee", pd.Series(dtype=str))
+    well_licensees = wells.get("licensee", pd.Series(dtype=str))
     return pd.DataFrame(
         {
             "name_raw": pd.concat(
@@ -403,6 +518,7 @@ def prepare_operator_dim_inputs(frames_by_kind: dict[str, list[pd.DataFrame]]) -
                     facilities.get("facility_operator", pd.Series(dtype=str)),
                     operators.get("ba_name_raw", pd.Series(dtype=str)),
                     operators.get("name_raw", pd.Series(dtype=str)),
+                    _merge_kind_frames(frames_by_kind, "pipelines").get("company_name", pd.Series(dtype=str)),
                     liability.get("operator", pd.Series(dtype=str)),
                 ],
                 ignore_index=True,
@@ -417,8 +533,15 @@ def prepare_wells_df(frames_by_kind: dict[str, list[pd.DataFrame]], op_map: dict
     if not df.empty:
         out["uwi_raw"] = df["uwi"].astype(str)
         out["well_id"] = out["uwi_raw"].map(normalize_uwi)
-        out["status"] = df.get("status", "UNKNOWN").astype(str)
+        license_numbers = df.get("license_number", pd.Series([None] * len(df), index=df.index))
+        out["license_number"] = license_numbers.where(pd.notna(license_numbers), None)
+        out["well_name"] = df.get("well_name")
+        out["field_name"] = df.get("field_name")
+        out["pool_name"] = df.get("pool_name")
+        out["status"] = _normalize_status_series(df.get("status", pd.Series([None] * len(df), index=df.index)))
         out["licensee_operator_id"] = df.get("licensee", "").astype(str).map(normalize_operator_name).map(op_map)
+        spud_date_raw = df.get("spud_date", pd.Series([None] * len(df), index=df.index))
+        out["spud_date"] = pd.to_datetime(spud_date_raw, errors="coerce").dt.date
         out["lsd"] = df.get("lsd")
         out["section"] = pd.to_numeric(df.get("section"), errors="coerce")
         out["township"] = pd.to_numeric(df.get("township"), errors="coerce")
@@ -428,7 +551,7 @@ def prepare_wells_df(frames_by_kind: dict[str, list[pd.DataFrame]], op_map: dict
         out["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
         out["first_seen"] = as_of
         out["last_seen"] = as_of
-        out["source"] = "aer_st37"
+        out["source"] = df.get("source", "multi_source")
 
     bridge_raw = _merge_kind_frames(frames_by_kind, "well_facility_bridge")
     if not bridge_raw.empty and "well_id" in bridge_raw.columns:
@@ -439,8 +562,13 @@ def prepare_wells_df(frames_by_kind: dict[str, list[pd.DataFrame]], op_map: dict
             supplemental = _empty_df(WELL_DIM_COLUMNS)
             supplemental["well_id"] = supplemental_ids
             supplemental["uwi_raw"] = supplemental_ids
+            supplemental["license_number"] = pd.NA
+            supplemental["well_name"] = pd.NA
+            supplemental["field_name"] = pd.NA
+            supplemental["pool_name"] = pd.NA
             supplemental["status"] = "UNKNOWN"
             supplemental["licensee_operator_id"] = pd.NA
+            supplemental["spud_date"] = pd.NA
             supplemental["lsd"] = pd.NA
             supplemental["section"] = pd.NA
             supplemental["township"] = pd.NA
@@ -452,6 +580,13 @@ def prepare_wells_df(frames_by_kind: dict[str, list[pd.DataFrame]], op_map: dict
             supplemental["last_seen"] = as_of
             supplemental["source"] = "petrinex_bridge"
             out = pd.concat([out, supplemental], ignore_index=True)
+
+    out = _coalesce_rows_by_key(out, "well_id", WELL_DIM_COLUMNS)
+    if not out.empty:
+        out["license_number"] = out["license_number"].map(_stringify_identifier)
+        out["first_seen"] = as_of
+        out["last_seen"] = as_of
+        out["source"] = out["source"].fillna("multi_source")
     return out
 
 
@@ -460,10 +595,15 @@ def prepare_facilities_df(frames_by_kind: dict[str, list[pd.DataFrame]], operato
     if fac_raw.empty:
         return pd.DataFrame()
 
-    fac_df = pd.DataFrame()
+    fac_df = pd.DataFrame(index=fac_raw.index)
     fac_df["facility_id"] = fac_raw["facility_id"].astype(str)
+    fac_df["facility_name"] = fac_raw.get("facility_name")
+    facility_license_numbers = fac_raw.get("license_number", pd.Series([None] * len(fac_raw), index=fac_raw.index))
+    fac_df["license_number"] = facility_license_numbers.where(pd.notna(facility_license_numbers), None)
     fac_df["facility_type"] = fac_raw.get("facility_type")
+    fac_df["facility_subtype"] = fac_raw.get("facility_subtype")
     fac_df["facility_operator_id"] = fac_raw.get("facility_operator", "").astype(str).map(normalize_operator_name).map(operator_map)
+    fac_df["facility_status"] = fac_raw.get("facility_status")
     fac_df["lsd"] = fac_raw.get("lsd")
     fac_df["section"] = pd.to_numeric(fac_raw.get("section"), errors="coerce")
     fac_df["township"] = pd.to_numeric(fac_raw.get("township"), errors="coerce")
@@ -471,10 +611,109 @@ def prepare_facilities_df(frames_by_kind: dict[str, list[pd.DataFrame]], operato
     fac_df["meridian"] = pd.to_numeric(fac_raw.get("meridian"), errors="coerce")
     fac_df["lat"] = pd.to_numeric(fac_raw.get("lat"), errors="coerce")
     fac_df["lon"] = pd.to_numeric(fac_raw.get("lon"), errors="coerce")
-    fac_df["source"] = "petrinex_facility"
+    fac_df["source"] = fac_raw.get("source", "multi_source")
     fac_df["facility_id"] = fac_df["facility_id"].fillna("").astype(str).str.strip()
-    fac_df = fac_df[fac_df["facility_id"] != ""].drop_duplicates(subset=["facility_id"], keep="last")
+    fac_df = _coalesce_rows_by_key(fac_df, "facility_id", FACILITY_DIM_COLUMNS)
+    if not fac_df.empty:
+        fac_df["license_number"] = fac_df["license_number"].map(_stringify_identifier)
     return fac_df
+
+
+def prepare_pipelines_df(frames_by_kind: dict[str, list[pd.DataFrame]], operator_map: dict[str, int]) -> pd.DataFrame:
+    pipe_raw = _merge_kind_frames(frames_by_kind, "pipelines")
+    if pipe_raw.empty:
+        return pd.DataFrame(columns=PIPELINE_DIM_COLUMNS)
+
+    pipe_df = pd.DataFrame(index=pipe_raw.index)
+    pipe_df["pipeline_id"] = pipe_raw.get("pipeline_id", "").fillna("").astype(str).str.strip()
+    pipe_df["license_number"] = pipe_raw.get("license_number", pd.Series([None] * len(pipe_raw), index=pipe_raw.index)).where(
+        pd.notna(pipe_raw.get("license_number", pd.Series([None] * len(pipe_raw), index=pipe_raw.index))), None
+    )
+    pipe_df["line_number"] = pipe_raw.get("line_number")
+    pipe_df["licence_line_number"] = pipe_raw.get("licence_line_number")
+    pipe_df["operator_id"] = pipe_raw.get("company_name", "").astype(str).map(normalize_operator_name).map(operator_map)
+    pipe_df["company_name"] = pipe_raw.get("company_name")
+    pipe_df["ba_code"] = pipe_raw.get("ba_code")
+    pipe_df["segment_status"] = pipe_raw.get("segment_status")
+    pipe_df["from_facility_type"] = pipe_raw.get("from_facility_type")
+    pipe_df["from_location"] = pipe_raw.get("from_location")
+    pipe_df["to_facility_type"] = pipe_raw.get("to_facility_type")
+    pipe_df["to_location"] = pipe_raw.get("to_location")
+    pipe_df["substance1"] = pipe_raw.get("substance1")
+    pipe_df["substance2"] = pipe_raw.get("substance2")
+    pipe_df["substance3"] = pipe_raw.get("substance3")
+    pipe_df["segment_length_km"] = pd.to_numeric(pipe_raw.get("segment_length_km"), errors="coerce")
+    pipe_df["geometry_source"] = pipe_raw.get("geometry_source")
+    pipe_df["centroid_lat"] = pd.to_numeric(pipe_raw.get("centroid_lat"), errors="coerce")
+    pipe_df["centroid_lon"] = pd.to_numeric(pipe_raw.get("centroid_lon"), errors="coerce")
+    pipe_df["source"] = pipe_raw.get("source", "aer_spatial_pipelines")
+    pipe_df = _coalesce_rows_by_key(pipe_df, "pipeline_id", PIPELINE_DIM_COLUMNS)
+    if not pipe_df.empty:
+        pipe_df["license_number"] = pipe_df["license_number"].map(_stringify_identifier)
+    return pipe_df
+
+
+def prepare_crown_dispositions_df(frames_by_kind: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
+    raw = _merge_kind_frames(frames_by_kind, "crown_dispositions")
+    if raw.empty:
+        return pd.DataFrame(columns=CROWN_DISPOSITION_COLUMNS)
+
+    out = raw.reindex(columns=CROWN_DISPOSITION_COLUMNS).copy()
+    out["disposition_id"] = out["disposition_id"].fillna("").astype(str).str.strip()
+    out["agreement_no"] = out["agreement_no"].fillna("").astype(str).str.strip().replace({"": None})
+    out["effective_from"] = pd.to_datetime(out["effective_from"], errors="coerce").dt.date
+    out["effective_to"] = pd.to_datetime(out["effective_to"], errors="coerce").dt.date
+    out["source"] = out["source"].fillna("ami_crown_dispositions")
+    out = out[out["disposition_id"] != ""]
+    return _coalesce_rows_by_key(out, "disposition_id", CROWN_DISPOSITION_COLUMNS)
+
+
+def prepare_crown_clients_df(frames_by_kind: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
+    raw = _merge_kind_frames(frames_by_kind, "crown_clients")
+    if raw.empty:
+        return pd.DataFrame(columns=CROWN_CLIENT_COLUMNS)
+
+    out = raw.reindex(columns=CROWN_CLIENT_COLUMNS).copy()
+    out["client_id"] = out["client_id"].fillna("").astype(str).str.strip()
+    out = out[out["client_id"] != ""]
+    return _coalesce_rows_by_key(out, "client_id", CROWN_CLIENT_COLUMNS)
+
+
+def prepare_crown_participants_df(frames_by_kind: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
+    raw = _merge_kind_frames(frames_by_kind, "crown_participants")
+    if raw.empty:
+        return pd.DataFrame(columns=CROWN_PARTICIPANT_COLUMNS)
+
+    out = raw.reindex(columns=CROWN_PARTICIPANT_COLUMNS).copy()
+    out["disposition_id"] = out["disposition_id"].fillna("").astype(str).str.strip()
+    out["client_id"] = out["client_id"].fillna("").astype(str).str.strip()
+    out["role_type"] = out["role_type"].fillna("holder").astype(str).str.strip().replace({"": "holder"})
+    out["interest_pct"] = pd.to_numeric(out["interest_pct"], errors="coerce")
+    out["effective_from"] = pd.to_datetime(out["effective_from"], errors="coerce").dt.date
+    out["effective_to"] = pd.to_datetime(out["effective_to"], errors="coerce").dt.date
+    out["source"] = out["source"].fillna("ami_crown_participants")
+    out = out[(out["disposition_id"] != "") & (out["client_id"] != "")]
+    out = out.drop_duplicates(subset=["disposition_id", "client_id", "role_type"], keep="last")
+    return out
+
+
+def prepare_crown_land_df(frames_by_kind: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
+    raw = _merge_kind_frames(frames_by_kind, "crown_land_keys")
+    if raw.empty:
+        return pd.DataFrame(columns=CROWN_LAND_COLUMNS)
+
+    out = raw.reindex(columns=CROWN_LAND_COLUMNS).copy()
+    out["disposition_id"] = out["disposition_id"].fillna("").astype(str).str.strip()
+    out["tract_no"] = out["tract_no"].fillna("").astype(str).str.strip().replace({"": None})
+    out["lsd"] = out["lsd"].map(normalize_lsd)
+    for column in ["section", "township", "range", "meridian"]:
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    out["source"] = out["source"].fillna("ami_crown_land_keys")
+    out = out[out["disposition_id"] != ""]
+    out = out.dropna(subset=["section", "township", "range", "meridian"])
+    out[["section", "township", "range", "meridian"]] = out[["section", "township", "range", "meridian"]].astype(int)
+    out = out.drop_duplicates(subset=["disposition_id", "tract_no", "lsd", "section", "township", "range", "meridian"])
+    return out
 
 
 def prepare_bridge_df(frames_by_kind: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
@@ -590,7 +829,7 @@ def prepare_production_dfs(
     if not wells_df.empty:
         st37_status = _empty_df(WELL_STATUS_COLUMNS)
         st37_status["well_id"] = wells_df["well_id"]
-        st37_status["status"] = wells_df["status"]
+        st37_status["status"] = _normalize_status_series(wells_df["status"])
         st37_status["status_date"] = None
         st37_status["source"] = "aer_st37"
         status_frames.append(st37_status)
@@ -609,6 +848,7 @@ def prepare_production_dfs(
 
     if status_frames:
         status_df = pd.concat(status_frames, ignore_index=True)
+        status_df["status"] = _normalize_status_series(status_df["status"])
 
     op_prod = _empty_df(OPERATOR_PROD_COLUMNS)
     if not fac_prod.empty and not fac_df.empty and "facility_operator_id" in fac_df.columns:
@@ -731,6 +971,36 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
                 fac_df = prepare_facilities_df(frames_by_kind, operator_map)
             with _phase("Upserting dim_facility", lambda: row_counts["loaded"].get("dim_facility", 0)):
                 row_counts["loaded"]["dim_facility"] = upsert_dim_facility(conn, fac_df)
+            with _phase("Preparing pipelines dataframe", lambda: len(pipe_df)):
+                pipe_df = prepare_pipelines_df(frames_by_kind, operator_map)
+            with _phase("Upserting dim_pipeline", lambda: row_counts["loaded"].get("dim_pipeline", 0)):
+                row_counts["loaded"]["dim_pipeline"] = upsert_dim_pipeline(conn, pipe_df)
+            with _phase("Preparing crown disposition dataframe", lambda: len(crown_dispositions_df)):
+                crown_dispositions_df = prepare_crown_dispositions_df(frames_by_kind)
+            with _phase("Upserting dim_crown_disposition", lambda: row_counts["loaded"].get("dim_crown_disposition", 0)):
+                row_counts["loaded"]["dim_crown_disposition"] = upsert_dim_crown_disposition(conn, crown_dispositions_df)
+            with _phase("Preparing crown client dataframe", lambda: len(crown_clients_df)):
+                crown_clients_df = prepare_crown_clients_df(frames_by_kind)
+            with _phase("Upserting dim_crown_client", lambda: row_counts["loaded"].get("dim_crown_client", 0)):
+                row_counts["loaded"]["dim_crown_client"] = upsert_dim_crown_client(conn, crown_clients_df, source="ami_crown_clients")
+            with _phase("Preparing crown participant dataframe", lambda: len(crown_participants_df)):
+                crown_participants_df = prepare_crown_participants_df(frames_by_kind)
+            with _phase(
+                "Loading bridge_crown_disposition_client",
+                lambda: row_counts["loaded"].get("bridge_crown_disposition_client", 0),
+            ):
+                row_counts["loaded"]["bridge_crown_disposition_client"] = replace_bridge_crown_disposition_client(
+                    conn, crown_participants_df
+                )
+            with _phase("Preparing crown land dataframe", lambda: len(crown_land_df)):
+                crown_land_df = prepare_crown_land_df(frames_by_kind)
+            with _phase(
+                "Loading bridge_crown_disposition_land",
+                lambda: row_counts["loaded"].get("bridge_crown_disposition_land", 0),
+            ):
+                row_counts["loaded"]["bridge_crown_disposition_land"] = replace_bridge_crown_disposition_land(
+                    conn, crown_land_df
+                )
 
             with _phase("Preparing bridge dataframe", lambda: len(bridge_df)):
                 bridge_df = prepare_bridge_df(frames_by_kind)
@@ -762,8 +1032,13 @@ def run_ingestion_pipeline(args) -> tuple[int, PipelineResult | None]:
                         supplemental = _empty_df(WELL_DIM_COLUMNS)
                         supplemental["well_id"] = missing_well_ids
                         supplemental["uwi_raw"] = missing_well_ids
+                        supplemental["license_number"] = pd.NA
+                        supplemental["well_name"] = pd.NA
+                        supplemental["field_name"] = pd.NA
+                        supplemental["pool_name"] = pd.NA
                         supplemental["status"] = "UNKNOWN"
                         supplemental["licensee_operator_id"] = pd.NA
+                        supplemental["spud_date"] = pd.NA
                         supplemental["lsd"] = pd.NA
                         supplemental["section"] = pd.NA
                         supplemental["township"] = pd.NA

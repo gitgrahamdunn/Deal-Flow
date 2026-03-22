@@ -14,6 +14,97 @@ sources:
     file_type: txt
     refresh_frequency: monthly
 
+  aer_general_well_data:
+    enabled: true
+    source_name: aer_general_well_data
+    maturity: live_beta
+    required_for_live: false
+    local_sample: general_well_data_sample.csv
+    local_live_file: ""
+    parser_name: aer_general_well_data
+    landing_page_url: "https://www.aer.ca/data-and-performance-reports/activity-and-data/lists-and-activities/general-well-data"
+    dataset_url: ""
+    file_type: xlsx
+    refresh_frequency: daily
+
+  aer_st102_facility_list:
+    enabled: true
+    source_name: aer_st102_facility_list
+    maturity: live_beta
+    required_for_live: false
+    local_sample: st102_facility_list_sample.csv
+    local_live_file: ""
+    parser_name: aer_st102_facility_list
+    landing_page_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st102"
+    dataset_url: ""
+    file_type: xlsx
+    refresh_frequency: monthly
+
+  aer_spatial_pipelines:
+    enabled: true
+    source_name: aer_spatial_pipelines
+    maturity: live_beta
+    required_for_live: false
+    local_sample: pipelines_sample.csv
+    local_live_file: ""
+    parser_name: aer_spatial_pipelines
+    landing_page_url: "https://www.aer.ca/data-and-performance-reports/activity-and-data/spatial-data"
+    dataset_url: "https://static.aer.ca/prd/data/pipeline/Pipelines_SHP.zip"
+    file_type: zip
+    refresh_frequency: daily
+
+  ami_crown_dispositions:
+    enabled: false
+    source_name: ami_crown_dispositions
+    maturity: local_beta
+    required_for_live: false
+    local_sample: ami_crown_dispositions_sample.csv
+    local_live_file: ""
+    parser_name: ami_crown_dispositions
+    landing_page_url: "https://www.alberta.ca/search-surface-public-land-and-crown-mineral-disposition-and-activities"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
+
+  ami_crown_clients:
+    enabled: false
+    source_name: ami_crown_clients
+    maturity: local_beta
+    required_for_live: false
+    local_sample: ami_crown_clients_sample.csv
+    local_live_file: ""
+    parser_name: ami_crown_clients
+    landing_page_url: "https://www.alberta.ca/search-surface-public-land-and-crown-mineral-disposition-and-activities"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
+
+  ami_crown_land_keys:
+    enabled: false
+    source_name: ami_crown_land_keys
+    maturity: local_beta
+    required_for_live: false
+    local_sample: ami_crown_land_keys_sample.csv
+    local_live_file: ""
+    parser_name: ami_crown_land_keys
+    landing_page_url: "https://www.alberta.ca/search-surface-public-land-and-crown-mineral-disposition-and-activities"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
+
+  ami_crown_participants:
+    enabled: false
+    source_name: ami_crown_participants
+    maturity: local_beta
+    required_for_live: false
+    local_sample: ami_crown_participants_sample.csv
+    local_live_file: ""
+    parser_name: ami_crown_participants
+    landing_page_url: "https://www.alberta.ca/search-surface-public-land-and-crown-mineral-disposition-and-activities"
+    dataset_url: ""
+    file_type: csv
+    refresh_frequency: monthly
+
   aer_spatial_data:
     enabled: false
     source_name: aer_spatial
