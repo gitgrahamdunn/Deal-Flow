@@ -38,7 +38,8 @@ def apply_saved_sql() -> int:
 
     with engine.begin() as conn:
         for sql_file in SQL_FILES:
-            sql_path = repo_root / sql_file
+            dialect_specific_path = repo_root / "sql" / "views" / conn.dialect.name.lower() / sql_file.name
+            sql_path = dialect_specific_path if dialect_specific_path.exists() else repo_root / sql_file
             if not sql_path.exists():
                 continue
 
@@ -46,7 +47,7 @@ def apply_saved_sql() -> int:
             view_name = _extract_view_name(sql_text, sql_file.stem)
             conn.execute(text(f'DROP VIEW IF EXISTS "{view_name}"'))
             conn.execute(text(sql_text))
-            print(f"Applied: {sql_file}")
+            print(f"Applied: {sql_path.relative_to(repo_root)}")
 
     return 0
 

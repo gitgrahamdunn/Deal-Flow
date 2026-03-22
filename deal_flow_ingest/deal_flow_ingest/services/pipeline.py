@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import unquote
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 
 from deal_flow_ingest.config import get_database_url, iter_enabled_sources, load_config
@@ -244,6 +244,17 @@ def reset_database(force: bool, include_cache: bool = False) -> tuple[int, str]:
         warning = "Refusing to drop non-SQLite database without --force"
         LOGGER.warning(warning)
         return 1, warning
+    else:
+        engine = get_engine(database_url)
+        with engine.begin() as conn:
+            if conn.dialect.name.lower().startswith("postgres"):
+                conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+                conn.execute(text("CREATE SCHEMA public"))
+                LOGGER.info("Dropped and recreated PostgreSQL public schema")
+            else:
+                warning = f"Reset for non-SQLite dialect {conn.dialect.name} is not implemented"
+                LOGGER.warning(warning)
+                return 1, warning
 
     if include_cache:
         raw_dir = Path("data/raw")

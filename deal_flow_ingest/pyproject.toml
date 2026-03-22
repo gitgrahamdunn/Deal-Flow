@@ -11,6 +11,7 @@ dependencies = [
   "pandas>=2.0",
   "requests>=2.31",
   "SQLAlchemy>=2.0",
+  "psycopg[binary]>=3.2",
   "pydantic>=2.0",
   "PyYAML>=6.0",
   "alembic>=1.13",

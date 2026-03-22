@@ -6,6 +6,16 @@
 pip install -e deal_flow_ingest
 ```
 
+For the long-term webapp path, run the warehouse on Postgres:
+
+```bash
+pip install -e deal_flow_ingest
+docker-compose -f docker-compose.postgres.yml up -d
+export DATABASE_URL=postgresql+psycopg://dealflow:dealflow@localhost:5432/dealflow
+python -m deal_flow_ingest run --dry-run
+python -m deal_flow_ingest apply_saved_sql
+```
+
 ## CLI commands
 
 ```bash
@@ -125,9 +135,35 @@ For frontend work, use the backend query contract in `services/registry_queries.
 
 ## SQLite vs Postgres guidance
 
-- SQLite remains fully supported for local development and tests.
+- Postgres is the recommended target for the self-hosted webapp and any concurrent ingestion/query workload.
+- SQLite remains supported for local development and tests.
 - Loader chunk sizing and update batching are dialect-aware.
 - JSON-like fields are handled consistently via centralized DB-layer compatibility serialization for SQLite text-backed JSON columns.
+- `reset --force` now clears and recreates the `public` schema on Postgres before rerunning migrations.
+- Alembic enables `postgis` automatically when running against PostgreSQL.
+
+## Postgres bootstrap
+
+1. Start the bundled database:
+```bash
+docker-compose -f docker-compose.postgres.yml up -d
+```
+2. Point the app at it:
+```bash
+export DATABASE_URL=postgresql+psycopg://dealflow:dealflow@localhost:5432/dealflow
+```
+3. Run migrations and a smoke ingest:
+```bash
+python -m deal_flow_ingest run --dry-run
+python -m deal_flow_ingest apply_saved_sql
+```
+4. Rebuild the real warehouse in Postgres:
+```bash
+python -m deal_flow_ingest run
+python -m deal_flow_ingest apply_saved_sql
+```
+
+Fresh reingestion is the recommended cutover path from SQLite. The warehouse is reproducible, so a dump/restore step is not required.
 
 ## Local development flow
 

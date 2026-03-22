@@ -356,4 +356,7 @@ class IngestionRun(Base):
 
 
 def get_engine(database_url: str):
-    return create_engine(database_url, future=True)
+    engine_kwargs = {"future": True, "pool_pre_ping": True}
+    if database_url.startswith("sqlite"):
+        return create_engine(database_url, **engine_kwargs)
+    return create_engine(database_url, pool_size=10, max_overflow=20, **engine_kwargs)

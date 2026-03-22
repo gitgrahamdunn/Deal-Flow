@@ -23,9 +23,15 @@ from deal_flow_ingest.transform.opportunities import compute_well_opportunities
 LOGGER = logging.getLogger(__name__)
 
 
-def _is_missing_sqlite_object_error(exc: Exception) -> bool:
+def _is_missing_db_object_error(exc: Exception) -> bool:
     message = str(exc).lower()
-    return "no such table:" in message or "no such view:" in message
+    return (
+        "no such table:" in message
+        or "no such view:" in message
+        or "relation " in message and " does not exist" in message
+        or "undefinedtable" in message
+        or "undefined table" in message
+    )
 
 
 def _read_curated_frame(sql: str, params: dict[str, object] | None = None) -> pd.DataFrame:
@@ -35,7 +41,7 @@ def _read_curated_frame(sql: str, params: dict[str, object] | None = None) -> pd
         with engine.connect() as conn:
             return pd.read_sql(text(sql), conn, params=params)
     except OperationalError as exc:
-        if not _is_missing_sqlite_object_error(exc):
+        if not _is_missing_db_object_error(exc):
             raise
 
     from deal_flow_ingest.apply_saved_sql import apply_saved_sql
