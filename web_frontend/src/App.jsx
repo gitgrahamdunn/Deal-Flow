@@ -12,6 +12,7 @@ import {
 
 const DEFAULT_CENTER = [-114.5, 54.7];
 const DEFAULT_ZOOM = 5.1;
+const WELL_LOAD_MIN_ZOOM = 6.8;
 
 const rasterStyle = {
   version: 8,
@@ -120,10 +121,35 @@ function getSelectedRow(layers, selectedAsset) {
   );
 }
 
+function shouldLoadWells(map, filters) {
+  if (!filters.assetTypes.wells) {
+    return false;
+  }
+  if (filters.operator || filters.candidateOnly) {
+    return true;
+  }
+  return (map?.getZoom() || DEFAULT_ZOOM) >= WELL_LOAD_MIN_ZOOM;
+}
+
+function getLayerLimit(map, filters) {
+  const zoom = map?.getZoom() || DEFAULT_ZOOM;
+  if (filters.candidateOnly) {
+    return 25000;
+  }
+  if (zoom >= 9) {
+    return 25000;
+  }
+  if (zoom >= WELL_LOAD_MIN_ZOOM) {
+    return 12000;
+  }
+  return 4000;
+}
+
 function App() {
   const mapNodeRef = useRef(null);
   const mapRef = useRef(null);
   const popupRef = useRef(null);
+  const mapRequestRef = useRef({ id: 0, controller: null, timer: null });
 
   const [summary, setSummary] = useState(null);
   const [options, setOptions] = useState({
@@ -145,6 +171,7 @@ function App() {
   const [viewportToken, setViewportToken] = useState(0);
   const [pendingFocus, setPendingFocus] = useState(null);
   const [candidateQuery, setCandidateQuery] = useState("");
+  const [wellLoadingState, setWellLoadingState] = useState("full");
   const [filters, setFilters] = useState({
     assetTypes: {
       wells: true,
@@ -235,8 +262,20 @@ function App() {
     mapRef.current = map;
 
     map.on("load", () => {
-      map.addSource("facilities", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addSource("wells", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addSource("facilities", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+        cluster: true,
+        clusterRadius: 42,
+        clusterMaxZoom: 9,
+      });
+      map.addSource("wells", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+        cluster: true,
+        clusterRadius: 48,
+        clusterMaxZoom: 10,
+      });
       map.addSource("pipelines", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addSource("selection-point", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addSource("selection-line", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -266,9 +305,47 @@ function App() {
       });
 
       map.addLayer({
+        id: "facilities-clusters",
+        type: "circle",
+        source: "facilities",
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-radius": [
+            "step",
+            ["get", "point_count"],
+            14,
+            25,
+            18,
+            100,
+            24,
+          ],
+          "circle-color": "#166b68",
+          "circle-opacity": 0.78,
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#f5f1e8",
+        },
+      });
+
+      map.addLayer({
+        id: "facilities-cluster-count",
+        type: "symbol",
+        source: "facilities",
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": ["get", "point_count_abbreviated"],
+          "text-font": ["Open Sans Semibold"],
+          "text-size": 11,
+        },
+        paint: {
+          "text-color": "#f5f1e8",
+        },
+      });
+
+      map.addLayer({
         id: "facilities",
         type: "circle",
         source: "facilities",
+        filter: ["!", ["has", "point_count"]],
         paint: {
           "circle-radius": [
             "interpolate",
@@ -291,9 +368,47 @@ function App() {
       });
 
       map.addLayer({
+        id: "wells-clusters",
+        type: "circle",
+        source: "wells",
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-radius": [
+            "step",
+            ["get", "point_count"],
+            14,
+            25,
+            20,
+            100,
+            28,
+          ],
+          "circle-color": "#a14a66",
+          "circle-opacity": 0.78,
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#f5f1e8",
+        },
+      });
+
+      map.addLayer({
+        id: "wells-cluster-count",
+        type: "symbol",
+        source: "wells",
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": ["get", "point_count_abbreviated"],
+          "text-font": ["Open Sans Semibold"],
+          "text-size": 11,
+        },
+        paint: {
+          "text-color": "#fff6f2",
+        },
+      });
+
+      map.addLayer({
         id: "wells",
         type: "circle",
         source: "wells",
+        filter: ["!", ["has", "point_count"]],
         paint: {
           "circle-radius": [
             "interpolate",
@@ -355,7 +470,7 @@ function App() {
 
       const handlePointer = (event) => {
         const features = map.queryRenderedFeatures(event.point, {
-          layers: ["facilities", "wells", "pipelines"],
+          layers: ["facilities", "wells", "pipelines", "facilities-clusters", "wells-clusters"],
         });
         map.getCanvas().style.cursor = features.length ? "pointer" : "";
       };
@@ -363,12 +478,27 @@ function App() {
 
       const handleClick = (event) => {
         const features = map.queryRenderedFeatures(event.point, {
-          layers: ["facilities", "wells", "pipelines"],
+          layers: ["facilities", "wells", "pipelines", "facilities-clusters", "wells-clusters"],
         });
         if (!features.length) {
           return;
         }
         const feature = features[0];
+        const layerId = feature.layer?.id;
+        if (layerId === "facilities-clusters" || layerId === "wells-clusters") {
+          const sourceName = layerId.startsWith("facilities") ? "facilities" : "wells";
+          map.getSource(sourceName)?.getClusterExpansionZoom(feature.properties.cluster_id, (err, zoom) => {
+            if (err) {
+              return;
+            }
+            map.easeTo({
+              center: feature.geometry.coordinates,
+              zoom,
+              duration: 500,
+            });
+          });
+          return;
+        }
         const props = feature.properties || {};
         if (popupRef.current) {
           popupRef.current.remove();
@@ -395,6 +525,10 @@ function App() {
     });
 
     return () => {
+      if (mapRequestRef.current.timer) {
+        window.clearTimeout(mapRequestRef.current.timer);
+      }
+      mapRequestRef.current.controller?.abort();
       map.remove();
       mapRef.current = null;
     };
@@ -406,29 +540,65 @@ function App() {
     }
     const map = mapRef.current;
     const bounds = map.getBounds();
-    const assetTypes = activeAssetTypes.length ? activeAssetTypes : ["facilities", "pipelines"];
+    const loadWells = shouldLoadWells(map, filters);
+    const assetTypes = activeAssetTypes.filter((assetType) => assetType !== "wells" || loadWells);
+    const effectiveAssetTypes = assetTypes.length ? assetTypes : activeAssetTypes.length ? [] : ["facilities", "pipelines"];
+    const limitPerLayer = getLayerLimit(map, filters);
+    if (!effectiveAssetTypes.length) {
+      setWellLoadingState(loadWells ? "full" : "zoom_gate");
+      setLayers({ wells: [], facilities: [], pipelines: [] });
+      setCounts({ wells: 0, facilities: 0, pipelines: 0 });
+      map.getSource("facilities")?.setData(toPointFeatures([]));
+      map.getSource("wells")?.setData(toPointFeatures([]));
+      map.getSource("pipelines")?.setData(toLineFeatures([]));
+      return;
+    }
     const params = {
-      asset_types: assetTypes.join(","),
+      asset_types: effectiveAssetTypes.join(","),
       operator: filters.operator,
       statuses: filters.statuses,
       candidate_only: filters.candidateOnly,
-      limit_per_layer: 15000,
+      limit_per_layer: limitPerLayer,
       ...boundsToQuery(bounds),
     };
 
+    setWellLoadingState(loadWells ? "full" : "zoom_gate");
+    if (mapRequestRef.current.timer) {
+      window.clearTimeout(mapRequestRef.current.timer);
+    }
+    mapRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = mapRequestRef.current.id + 1;
+    mapRequestRef.current = { id: requestId, controller, timer: null };
+
     setLoadingMap(true);
-    getMapAssets(params)
-      .then((payload) => {
-        startTransition(() => {
-          setLayers(payload.layers);
-          setCounts(payload.counts);
+    mapRequestRef.current.timer = window.setTimeout(() => {
+      getMapAssets({ ...params, signal: controller.signal })
+        .then((payload) => {
+          if (mapRequestRef.current.id !== requestId) {
+            return;
+          }
+          startTransition(() => {
+            setLayers(payload.layers);
+            setCounts(payload.counts);
+          });
+          map.getSource("facilities")?.setData(toPointFeatures(payload.layers.facilities || []));
+          map.getSource("wells")?.setData(toPointFeatures(payload.layers.wells || []));
+          map.getSource("pipelines")?.setData(toLineFeatures(payload.layers.pipelines || []));
+          setError("");
+        })
+        .catch((err) => {
+          if (err.name === "AbortError" || mapRequestRef.current.id !== requestId) {
+            return;
+          }
+          setError(`Failed map load: ${err.message}`);
+        })
+        .finally(() => {
+          if (mapRequestRef.current.id === requestId) {
+            setLoadingMap(false);
+          }
         });
-        map.getSource("facilities")?.setData(toPointFeatures(payload.layers.facilities || []));
-        map.getSource("wells")?.setData(toPointFeatures(payload.layers.wells || []));
-        map.getSource("pipelines")?.setData(toLineFeatures(payload.layers.pipelines || []));
-      })
-      .catch((err) => setError(`Failed map load: ${err.message}`))
-      .finally(() => setLoadingMap(false));
+    }, 180);
   }, [filters, mapReady, activeAssetTypes, viewportToken]);
 
   useEffect(() => {
@@ -651,6 +821,9 @@ function App() {
             <div>Visible wells: {formatNumber(counts.wells)}</div>
           </div>
           <div className="chip">Approx well points: {formatNumber(approximateWellCount)}</div>
+          {wellLoadingState === "zoom_gate" ? (
+            <div className="chip muted">Zoom in or filter to load wells</div>
+          ) : null}
         </section>
 
         <section className="panel scroll-panel">

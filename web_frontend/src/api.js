@@ -20,14 +20,15 @@ export function getFilterOptions() {
 }
 
 export function getMapAssets(params) {
+  const { signal, ...queryParams } = params;
   const query = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
+  Object.entries(queryParams).forEach(([key, value]) => {
     if (value === null || value === undefined || value === "") {
       return;
     }
     query.set(key, String(value));
   });
-  return fetchJson(`/api/map/assets?${query.toString()}`);
+  return fetchJson(`/api/map/assets?${query.toString()}`, signal ? { signal } : {});
 }
 
 export function getSellerCandidates(limit = 100, minScore = 0) {

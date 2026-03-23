@@ -139,6 +139,11 @@ input {
   font-size: 0.74rem;
 }
 
+.chip.muted {
+  background: rgba(23, 48, 64, 0.12);
+  color: #365364;
+}
+
 .field {
   display: flex;
   flex-direction: column;
