@@ -15,6 +15,7 @@ DEFAULT_LIMIT_PER_LAYER = 50000
 MAX_LIMIT_PER_LAYER = 100000
 APPROX_LAT_DEGREES_PER_MILE = 1.0 / 69.172
 APPROX_LON_DEGREES_PER_MILE = 1.0 / 44.5
+LOW_ZOOM_WELL_AGGREGATION_THRESHOLD = 6.8
 
 
 @dataclass(slots=True)
@@ -116,6 +117,13 @@ def _append_common_filters(
 
 
 def _get_wells_layer(filters: RegistryMapFilters) -> pd.DataFrame:
+    aggregate_wells = bool(
+        filters.zoom is not None
+        and filters.zoom < LOW_ZOOM_WELL_AGGREGATION_THRESHOLD
+        and not filters.operator
+        and not filters.candidate_only
+    )
+    grid_size = 0.32 if filters.zoom is None or filters.zoom < 5.5 else 0.18
     clauses = ["w.display_lat IS NOT NULL", "w.display_lon IS NOT NULL"]
     params: dict[str, object] = {"limit": filters.limit_per_layer}
     if filters.operator:
@@ -142,6 +150,123 @@ def _get_wells_layer(filters: RegistryMapFilters) -> pd.DataFrame:
         params["max_lon"] = filters.max_lon
     if filters.candidate_only:
         clauses.append("(seller.operator IS NOT NULL OR restart.well_id IS NOT NULL)")
+
+    if aggregate_wells:
+        params["grid_size"] = grid_size
+        sql = f"""
+        WITH seller AS (
+            SELECT DISTINCT operator
+            FROM seller_theses
+        ),
+        restart AS (
+            SELECT DISTINCT well_id
+            FROM restart_well_candidates
+        ),
+        wells_with_display AS (
+            SELECT
+                base.*,
+                COALESCE(base.lat, base.approx_lat) AS display_lat,
+                COALESCE(base.lon, base.approx_lon) AS display_lon,
+                CASE
+                    WHEN base.lat IS NOT NULL AND base.lon IS NOT NULL THEN 'surveyed'
+                    WHEN base.approx_lat IS NOT NULL AND base.approx_lon IS NOT NULL THEN 'dls_approx'
+                    ELSE NULL
+                END AS location_method
+            FROM (
+                SELECT
+                    w.*,
+                    CASE
+                        WHEN w.section IS NULL OR w.township IS NULL OR w.range IS NULL OR w.meridian IS NULL THEN NULL
+                        ELSE
+                            49.0
+                            + (
+                                ((w.township - 1) * 6.0)
+                                + CAST(((w.section - 1) / 6) AS INTEGER)
+                                + CASE
+                                    WHEN CAST(w.lsd AS INTEGER) BETWEEN 1 AND 16
+                                    THEN (CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER) * 0.25) + 0.125
+                                    ELSE 0.5
+                                  END
+                            ) * {APPROX_LAT_DEGREES_PER_MILE}
+                    END AS approx_lat,
+                    CASE
+                        WHEN w.section IS NULL OR w.township IS NULL OR w.range IS NULL OR w.meridian IS NULL THEN NULL
+                        ELSE
+                            (
+                                CASE
+                                    WHEN w.meridian = 1 THEN -97.4578917
+                                    WHEN w.meridian = 2 THEN -102.0
+                                    WHEN w.meridian = 3 THEN -106.0
+                                    WHEN w.meridian = 4 THEN -110.0
+                                    WHEN w.meridian = 5 THEN -114.0
+                                    WHEN w.meridian = 6 THEN -118.0
+                                    WHEN w.meridian = 7 THEN -122.0
+                                    ELSE NULL
+                                END
+                            )
+                            - (
+                                ((w.range - 1) * 6.0)
+                                + CASE
+                                    WHEN MOD(CAST(((w.section - 1) / 6) AS INTEGER), 2) = 0
+                                    THEN (w.section - (CAST(((w.section - 1) / 6) AS INTEGER) * 6) - 1)
+                                    ELSE (6 - (w.section - (CAST(((w.section - 1) / 6) AS INTEGER) * 6)))
+                                  END
+                                + CASE
+                                    WHEN CAST(w.lsd AS INTEGER) BETWEEN 1 AND 16
+                                    THEN (
+                                        CASE
+                                            WHEN MOD(CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER), 2) = 0
+                                            THEN (CAST(w.lsd AS INTEGER) - (CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER) * 4) - 1) * 0.25 + 0.125
+                                            ELSE (4 - (CAST(w.lsd AS INTEGER) - (CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER) * 4))) * 0.25 + 0.125
+                                        END
+                                    )
+                                    ELSE 0.5
+                                  END
+                            ) * {APPROX_LON_DEGREES_PER_MILE}
+                    END AS approx_lon
+                FROM asset_registry_wells w
+            ) base
+        ),
+        filtered_wells AS (
+            SELECT
+                w.*,
+                CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
+                CASE WHEN restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_restart,
+                CASE WHEN seller.operator IS NOT NULL OR restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_any
+            FROM wells_with_display w
+            LEFT JOIN seller
+                ON seller.operator = w.operator
+            LEFT JOIN restart
+                ON restart.well_id = w.well_id
+            WHERE {' AND '.join(clauses)}
+        )
+        SELECT
+            'well' AS asset_type,
+            'agg:' || CAST(ROUND(MIN(display_lat) / :grid_size) * :grid_size AS TEXT) || ':' ||
+                CAST(ROUND(MIN(display_lon) / :grid_size) * :grid_size AS TEXT) AS asset_id,
+            CAST(COUNT(*) AS TEXT) || ' wells' AS asset_name,
+            NULL AS license_number,
+            NULL AS operator,
+            'AGGREGATED' AS status,
+            AVG(display_lat) AS lat,
+            AVG(display_lon) AS lon,
+            NULL AS field_name,
+            NULL AS pool_name,
+            NULL AS restart_score,
+            'aggregated' AS location_method,
+            MAX(candidate_operator) AS candidate_operator,
+            MAX(candidate_restart) AS candidate_restart,
+            MAX(candidate_any) AS candidate_any,
+            COUNT(*) AS well_count,
+            1 AS is_aggregate
+        FROM filtered_wells
+        GROUP BY
+            ROUND(display_lat / :grid_size),
+            ROUND(display_lon / :grid_size)
+        ORDER BY MAX(candidate_any) DESC, COUNT(*) DESC
+        LIMIT :limit
+        """
+        return _read_frame(sql, params)
 
     sql = f"""
     WITH seller AS (
@@ -232,7 +357,9 @@ def _get_wells_layer(filters: RegistryMapFilters) -> pd.DataFrame:
         w.location_method,
         CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
         CASE WHEN restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_restart,
-        CASE WHEN seller.operator IS NOT NULL OR restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_any
+        CASE WHEN seller.operator IS NOT NULL OR restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_any,
+        1 AS well_count,
+        0 AS is_aggregate
     FROM wells_with_display w
     LEFT JOIN seller
         ON seller.operator = w.operator

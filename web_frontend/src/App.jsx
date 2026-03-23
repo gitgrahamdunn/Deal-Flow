@@ -12,7 +12,6 @@ import {
 
 const DEFAULT_CENTER = [-114.5, 54.7];
 const DEFAULT_ZOOM = 5.1;
-const WELL_LOAD_MIN_ZOOM = 6.8;
 
 const rasterStyle = {
   version: 8,
@@ -121,16 +120,6 @@ function getSelectedRow(layers, selectedAsset) {
   );
 }
 
-function shouldLoadWells(map, filters) {
-  if (!filters.assetTypes.wells) {
-    return false;
-  }
-  if (filters.operator || filters.candidateOnly) {
-    return true;
-  }
-  return (map?.getZoom() || DEFAULT_ZOOM) >= WELL_LOAD_MIN_ZOOM;
-}
-
 function getLayerLimit(map, filters) {
   const zoom = map?.getZoom() || DEFAULT_ZOOM;
   if (filters.candidateOnly) {
@@ -139,7 +128,7 @@ function getLayerLimit(map, filters) {
   if (zoom >= 9) {
     return 25000;
   }
-  if (zoom >= WELL_LOAD_MIN_ZOOM) {
+  if (zoom >= 6.8) {
     return 12000;
   }
   return 4000;
@@ -218,7 +207,14 @@ function App() {
   }, [packageRows, candidateQuery]);
 
   const approximateWellCount = useMemo(
-    () => (layers.wells || []).filter((row) => row.location_method === "dls_approx").length,
+    () =>
+      (layers.wells || [])
+        .filter((row) => row.location_method === "dls_approx")
+        .reduce((sum, row) => sum + Number(row.well_count || 1), 0),
+    [layers.wells],
+  );
+  const visibleWellTotal = useMemo(
+    () => (layers.wells || []).reduce((sum, row) => sum + Number(row.well_count || 1), 0),
     [layers.wells],
   );
 
@@ -500,13 +496,21 @@ function App() {
           return;
         }
         const props = feature.properties || {};
+        if (Number(props.is_aggregate) === 1) {
+          map.easeTo({
+            center: event.lngLat,
+            zoom: Math.max((map.getZoom() || DEFAULT_ZOOM) + 1.4, 7.2),
+            duration: 500,
+          });
+          return;
+        }
         if (popupRef.current) {
           popupRef.current.remove();
         }
         popupRef.current = new maplibregl.Popup({ closeButton: false, offset: 12 })
           .setLngLat(event.lngLat)
           .setHTML(
-            `<div class="map-popup"><strong>${props.asset_name || props.asset_id}</strong><br/>${props.operator || "Unknown operator"}<br/>${props.status || "Unknown status"}${props.location_method === "dls_approx" ? "<br/>Approximate DLS location" : ""}</div>`,
+            `<div class="map-popup"><strong>${props.asset_name || props.asset_id}</strong><br/>${props.operator || "Unknown operator"}<br/>${props.status || "Unknown status"}${props.location_method === "dls_approx" ? "<br/>Approximate DLS location" : ""}${Number(props.is_aggregate) === 1 ? "<br/>Zoom in for individual wells" : ""}</div>`,
           )
           .addTo(map);
 
@@ -540,19 +544,8 @@ function App() {
     }
     const map = mapRef.current;
     const bounds = map.getBounds();
-    const loadWells = shouldLoadWells(map, filters);
-    const assetTypes = activeAssetTypes.filter((assetType) => assetType !== "wells" || loadWells);
-    const effectiveAssetTypes = assetTypes.length ? assetTypes : activeAssetTypes.length ? [] : ["facilities", "pipelines"];
+    const effectiveAssetTypes = activeAssetTypes.length ? activeAssetTypes : ["facilities", "pipelines"];
     const limitPerLayer = getLayerLimit(map, filters);
-    if (!effectiveAssetTypes.length) {
-      setWellLoadingState(loadWells ? "full" : "zoom_gate");
-      setLayers({ wells: [], facilities: [], pipelines: [] });
-      setCounts({ wells: 0, facilities: 0, pipelines: 0 });
-      map.getSource("facilities")?.setData(toPointFeatures([]));
-      map.getSource("wells")?.setData(toPointFeatures([]));
-      map.getSource("pipelines")?.setData(toLineFeatures([]));
-      return;
-    }
     const params = {
       asset_types: effectiveAssetTypes.join(","),
       operator: filters.operator,
@@ -563,7 +556,7 @@ function App() {
       ...boundsToQuery(bounds),
     };
 
-    setWellLoadingState(loadWells ? "full" : "zoom_gate");
+    setWellLoadingState((map.getZoom() || DEFAULT_ZOOM) < 6.8 && filters.assetTypes.wells ? "aggregated" : "full");
     if (mapRequestRef.current.timer) {
       window.clearTimeout(mapRequestRef.current.timer);
     }
@@ -819,11 +812,11 @@ function App() {
           <div className="layer-counts">
             <div>Visible facilities: {formatNumber(counts.facilities)}</div>
             <div>Visible pipelines: {formatNumber(counts.pipelines)}</div>
-            <div>Visible wells: {formatNumber(counts.wells)}</div>
+            <div>Visible wells: {formatNumber(visibleWellTotal)}</div>
           </div>
           <div className="chip">Approx well points: {formatNumber(approximateWellCount)}</div>
-          {wellLoadingState === "zoom_gate" ? (
-            <div className="chip muted">Zoom in or filter to load wells</div>
+          {wellLoadingState === "aggregated" ? (
+            <div className="chip muted">Low zoom wells are aggregated</div>
           ) : null}
         </section>
 

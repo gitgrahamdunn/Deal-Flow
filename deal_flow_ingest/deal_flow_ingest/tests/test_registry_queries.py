@@ -11,6 +11,7 @@ from deal_flow_ingest.config import get_default_config_path
 from deal_flow_ingest.db.schema import get_engine
 from deal_flow_ingest.services import registry_queries
 from deal_flow_ingest.services.registry_queries import (
+    LOW_ZOOM_WELL_AGGREGATION_THRESHOLD,
     MAX_LIMIT_PER_LAYER,
     RegistryMapFilters,
     get_combined_registry_map_frame,
@@ -79,6 +80,23 @@ def test_registry_wells_fall_back_to_dls_display_locations(tmp_path: Path) -> No
     approx_rows = layers["wells"].loc[layers["wells"]["location_method"] == "dls_approx"]
     assert approx_rows["lat"].between(49.0, 61.0).all()
     assert approx_rows["lon"].between(-121.0, -109.0).all()
+
+
+def test_registry_wells_aggregate_at_low_zoom(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+    engine = get_engine(os.environ["DATABASE_URL"])
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE dim_well SET lat = NULL, lon = NULL"))
+
+    layers = get_registry_map_layers(
+        RegistryMapFilters(asset_types=("wells",), zoom=LOW_ZOOM_WELL_AGGREGATION_THRESHOLD - 1)
+    )
+
+    assert not layers["wells"].empty
+    assert layers["wells"]["is_aggregate"].eq(1).all()
+    assert layers["wells"]["location_method"].eq("aggregated").all()
+    assert layers["wells"]["well_count"].ge(1).all()
+    assert layers["wells"]["asset_id"].str.startswith("agg:").all()
 
 
 def test_registry_filter_options_expose_frontend_choices(tmp_path: Path) -> None:
