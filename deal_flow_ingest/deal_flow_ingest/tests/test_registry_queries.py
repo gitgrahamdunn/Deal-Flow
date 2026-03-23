@@ -2,12 +2,14 @@ import os
 from argparse import Namespace
 from pathlib import Path
 
+import pandas as pd
 from sqlalchemy import text
 
 from deal_flow_ingest.apply_saved_sql import apply_saved_sql
 from deal_flow_ingest.cli import run_ingestion
 from deal_flow_ingest.config import get_default_config_path
 from deal_flow_ingest.db.schema import get_engine
+from deal_flow_ingest.services import registry_queries
 from deal_flow_ingest.services.registry_queries import (
     MAX_LIMIT_PER_LAYER,
     RegistryMapFilters,
@@ -99,6 +101,29 @@ def test_registry_pipeline_layer_exposes_line_geometry(tmp_path: Path) -> None:
     assert "geometry_wkt" in layers["pipelines"].columns
     assert layers["pipelines"]["geometry_wkt"].notna().all()
     assert layers["pipelines"]["geometry_wkt"].str.startswith("LINESTRING (").all()
+
+
+def test_registry_pipeline_layer_simplifies_geometry_for_postgres_low_zoom(monkeypatch) -> None:
+    captured = {}
+
+    class _DummyDialect:
+        name = "postgresql"
+
+    class _DummyEngine:
+        dialect = _DummyDialect()
+
+    def _fake_read_frame(sql: str, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        captured["params"] = params
+        return pd.DataFrame(columns=["geometry_wkt"])
+
+    monkeypatch.setattr(registry_queries, "_read_frame", _fake_read_frame)
+    monkeypatch.setattr(registry_queries, "get_engine", lambda _url: _DummyEngine())
+
+    get_registry_map_layers(RegistryMapFilters(asset_types=("pipelines",), zoom=5.5))
+
+    assert "ST_SimplifyPreserveTopology" in captured["sql"]
+    assert "0.004" in captured["sql"]
 
 
 def test_registry_filters_normalize_and_cap_payloads(tmp_path: Path) -> None:

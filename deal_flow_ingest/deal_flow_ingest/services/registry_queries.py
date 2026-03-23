@@ -23,6 +23,7 @@ class RegistryMapFilters:
     operator: str | None = None
     statuses: tuple[str, ...] = ()
     candidate_only: bool = False
+    zoom: float | None = None
     min_lat: float | None = None
     max_lat: float | None = None
     min_lon: float | None = None
@@ -56,6 +57,7 @@ def _normalize_filters(filters: RegistryMapFilters) -> RegistryMapFilters:
         operator=operator,
         statuses=statuses,
         candidate_only=bool(filters.candidate_only),
+        zoom=float(filters.zoom) if filters.zoom is not None else None,
         min_lat=filters.min_lat,
         max_lat=filters.max_lat,
         min_lon=filters.min_lon,
@@ -311,6 +313,17 @@ def _get_pipelines_layer(filters: RegistryMapFilters) -> pd.DataFrame:
     if filters.candidate_only:
         clauses.append("seller.operator IS NOT NULL")
 
+    geometry_expr = "p.geometry_wkt"
+    dialect_name = get_engine(get_database_url()).dialect.name
+    if dialect_name == "postgresql" and filters.zoom is not None and filters.zoom < 10:
+        tolerance = 0.004 if filters.zoom < 6 else 0.0015 if filters.zoom < 8 else 0.0005
+        geometry_expr = (
+            "CASE "
+            "WHEN p.geometry_wkt IS NULL OR TRIM(p.geometry_wkt) = '' THEN p.geometry_wkt "
+            f"ELSE ST_AsText(ST_SimplifyPreserveTopology(ST_GeomFromText(p.geometry_wkt, 4326), {tolerance})) "
+            "END"
+        )
+
     sql = f"""
     WITH seller AS (
         SELECT DISTINCT operator
@@ -328,7 +341,7 @@ def _get_pipelines_layer(filters: RegistryMapFilters) -> pd.DataFrame:
         p.company_name,
         p.substance1,
         p.segment_length_km,
-        p.geometry_wkt,
+        {geometry_expr} AS geometry_wkt,
         CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
         0 AS candidate_restart,
         CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_any

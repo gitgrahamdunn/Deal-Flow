@@ -558,6 +558,7 @@ function App() {
       operator: filters.operator,
       statuses: filters.statuses,
       candidate_only: filters.candidateOnly,
+      zoom: map.getZoom().toFixed(2),
       limit_per_layer: limitPerLayer,
       ...boundsToQuery(bounds),
     };

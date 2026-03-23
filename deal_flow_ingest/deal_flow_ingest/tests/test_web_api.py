@@ -7,19 +7,11 @@ from deal_flow_ingest.web.api import create_app
 
 
 def test_web_api_endpoints(monkeypatch) -> None:
-    monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_summary", lambda: {"wells": 10, "facilities": 4, "pipelines": 2, "seller_candidates": 1, "package_candidates": 1})
-    monkeypatch.setattr(
-        "deal_flow_ingest.web.api.get_registry_filter_options",
-        lambda: {
-            "operators": ["ALPHA ENERGY LTD"],
-            "well_statuses": ["SUSPENDED"],
-            "facility_statuses": ["ACTIVE"],
-            "pipeline_statuses": ["OPERATING"],
-        },
-    )
-    monkeypatch.setattr(
-        "deal_flow_ingest.web.api.get_registry_map_layers",
-        lambda _filters: {
+    captured = {}
+
+    def fake_map_layers(_filters):
+        captured["filters"] = _filters
+        return {
             "facilities": pd.DataFrame(
                 [
                     {
@@ -49,7 +41,21 @@ def test_web_api_endpoints(monkeypatch) -> None:
                     }
                 ]
             ),
+        }
+
+    monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_summary", lambda: {"wells": 10, "facilities": 4, "pipelines": 2, "seller_candidates": 1, "package_candidates": 1})
+    monkeypatch.setattr(
+        "deal_flow_ingest.web.api.get_registry_filter_options",
+        lambda: {
+            "operators": ["ALPHA ENERGY LTD"],
+            "well_statuses": ["SUSPENDED"],
+            "facility_statuses": ["ACTIVE"],
+            "pipeline_statuses": ["OPERATING"],
         },
+    )
+    monkeypatch.setattr(
+        "deal_flow_ingest.web.api.get_registry_map_layers",
+        fake_map_layers,
     )
     monkeypatch.setattr(
         "deal_flow_ingest.web.api.get_seller_candidates",
@@ -70,9 +76,10 @@ def test_web_api_endpoints(monkeypatch) -> None:
     assert client.get("/api/summary").json()["wells"] == 10
     assert client.get("/api/map/filters").json()["operators"] == ["ALPHA ENERGY LTD"]
 
-    asset_payload = client.get("/api/map/assets?asset_types=facilities,pipelines&candidate_only=true").json()
+    asset_payload = client.get("/api/map/assets?asset_types=facilities,pipelines&candidate_only=true&zoom=7.5").json()
     assert asset_payload["counts"] == {"facilities": 1, "pipelines": 1}
     assert asset_payload["layers"]["facilities"][0]["asset_id"] == "FAC-1"
+    assert captured["filters"].zoom == 7.5
 
     assert client.get("/api/candidates/sellers").json()["count"] == 1
     assert client.get("/api/candidates/packages").json()["count"] == 1
