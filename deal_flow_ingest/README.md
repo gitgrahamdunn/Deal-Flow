@@ -51,6 +51,7 @@ dealflow build-sql
 dealflow ui
 dealflow app
 dealflow gui
+dealflow web
 dealflow funnel --status
 dealflow top50
 dealflow top100
@@ -79,11 +80,12 @@ GUI usage:
 dealflow app
 dealflow app --port 8502
 dealflow app --host 0.0.0.0 --port 8443
+dealflow web --host 0.0.0.0 --port 8000
 dealflow funnel --port 8443 --https-port 8443 --bg --yes
 dealflow funnel --status
 ```
 
-This launches a local Streamlit app with:
+`dealflow app` launches the legacy local Streamlit app with:
 
 - seller theses
 - low-production target screening
@@ -100,6 +102,35 @@ dealflow funnel --bg --yes
 ```
 
 Then open the Funnel URL reported by `dealflow funnel --status`.
+
+## Web app
+
+The new web UI runs as a FastAPI backend plus a React/MapLibre frontend.
+
+Backend only:
+
+```bash
+dealflow web --host 127.0.0.1 --port 8000
+```
+
+Frontend development:
+
+```bash
+cd web_frontend
+npm install
+npm run dev
+```
+
+Frontend production build:
+
+```bash
+cd web_frontend
+npm install
+npm run build
+dealflow web --host 0.0.0.0 --port 8000
+```
+
+If `web_frontend/dist` exists, the FastAPI app serves the built frontend directly.
 
 ## Recommended live workflow
 

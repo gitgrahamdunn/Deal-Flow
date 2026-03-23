@@ -88,6 +88,9 @@ def parse_args() -> argparse.Namespace:
     theses.add_argument("--output", type=str, default="data/exports/seller_theses.csv")
 
     sub.add_parser("ui", help="Interactive export helper")
+    web = sub.add_parser("web", help="Launch the new self-hosted web app")
+    web.add_argument("--port", type=int, default=8000)
+    web.add_argument("--host", type=str, default="127.0.0.1")
     app = sub.add_parser("app", help="Launch the local web GUI")
     app.add_argument("--port", type=int, default=8443)
     app.add_argument("--host", type=str, default="127.0.0.1")
@@ -184,6 +187,9 @@ def main() -> int:
 
     if args.command == "ui":
         return run_ui()
+
+    if args.command == "web":
+        return launch_web(args.port, args.host)
 
     if args.command in {"app", "gui"}:
         return launch_app(args.port, args.host)
@@ -439,6 +445,26 @@ def launch_app(port: int, host: str = "127.0.0.1") -> int:
         "true",
     ]
     print(f"Launching GUI at http://{host}:{port}")
+    return subprocess.call(cmd)
+
+
+def launch_web(port: int, host: str = "127.0.0.1") -> int:
+    probe_host = _app_probe_host(host)
+    if _is_port_open(probe_host, port):
+        print(f"Web app already running at http://{host}:{port}")
+        return 0
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "deal_flow_ingest.web.api:app",
+        "--host",
+        str(host),
+        "--port",
+        str(port),
+    ]
+    print(f"Launching web app at http://{host}:{port}")
     return subprocess.call(cmd)
 
 

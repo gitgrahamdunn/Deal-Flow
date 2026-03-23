@@ -317,3 +317,105 @@ def get_registry_filter_options() -> dict[str, list[str]]:
         if "status" in pipeline_statuses.columns
         else [],
     }
+
+
+def get_seller_candidates(limit: int = 200, min_score: float = 0.0) -> pd.DataFrame:
+    sql = """
+    SELECT *
+    FROM seller_theses
+    WHERE COALESCE(thesis_score, 0) >= :min_score
+    ORDER BY thesis_score DESC, seller_score DESC, operator
+    LIMIT :limit
+    """
+    return _read_frame(sql, {"limit": int(limit), "min_score": float(min_score)})
+
+
+def get_package_candidates(limit: int = 200, min_score: float = 0.0) -> pd.DataFrame:
+    sql = """
+    SELECT *
+    FROM package_candidates
+    WHERE COALESCE(package_score, 0) >= :min_score
+    ORDER BY package_score DESC, estimated_restart_upside_bpd DESC, operator, area_key
+    LIMIT :limit
+    """
+    return _read_frame(sql, {"limit": int(limit), "min_score": float(min_score)})
+
+
+def get_registry_summary() -> dict[str, int]:
+    summary_sql = """
+    SELECT
+        (SELECT COUNT(*) FROM dim_well) AS wells,
+        (SELECT COUNT(*) FROM dim_facility) AS facilities,
+        (SELECT COUNT(*) FROM dim_pipeline) AS pipelines,
+        (SELECT COUNT(*) FROM seller_theses) AS seller_candidates,
+        (SELECT COUNT(*) FROM package_candidates) AS package_candidates
+    """
+    frame = _read_frame(summary_sql)
+    if frame.empty:
+        return {"wells": 0, "facilities": 0, "pipelines": 0, "seller_candidates": 0, "package_candidates": 0}
+    row = frame.iloc[0].to_dict()
+    return {key: int(value or 0) for key, value in row.items()}
+
+
+def get_asset_detail(asset_type: str, asset_id: str) -> dict[str, object] | None:
+    normalized = asset_type.strip().lower()
+    if normalized == "well":
+        detail = _read_frame("SELECT * FROM asset_registry_wells WHERE well_id = :asset_id", {"asset_id": asset_id})
+        if detail.empty:
+            return None
+        links = _read_frame(
+            """
+            SELECT
+                f.facility_id,
+                f.facility_name,
+                f.operator,
+                f.facility_type,
+                f.facility_status
+            FROM bridge_well_facility bwf
+            JOIN asset_registry_facilities f
+                ON f.facility_id = bwf.facility_id
+            WHERE bwf.well_id = :asset_id
+            ORDER BY f.facility_id
+            """,
+            {"asset_id": asset_id},
+        )
+        payload = detail.iloc[0].where(pd.notna(detail.iloc[0]), None).to_dict()
+        payload["linked_facilities"] = links.where(pd.notna(links), None).to_dict(orient="records")
+        payload["asset_type"] = "well"
+        return payload
+
+    if normalized == "facility":
+        detail = _read_frame("SELECT * FROM asset_registry_facilities WHERE facility_id = :asset_id", {"asset_id": asset_id})
+        if detail.empty:
+            return None
+        links = _read_frame(
+            """
+            SELECT
+                w.well_id,
+                w.well_name,
+                w.operator,
+                w.status,
+                w.restart_score
+            FROM bridge_well_facility bwf
+            JOIN asset_registry_wells w
+                ON w.well_id = bwf.well_id
+            WHERE bwf.facility_id = :asset_id
+            ORDER BY w.well_id
+            LIMIT 250
+            """,
+            {"asset_id": asset_id},
+        )
+        payload = detail.iloc[0].where(pd.notna(detail.iloc[0]), None).to_dict()
+        payload["linked_wells"] = links.where(pd.notna(links), None).to_dict(orient="records")
+        payload["asset_type"] = "facility"
+        return payload
+
+    if normalized == "pipeline":
+        detail = _read_frame("SELECT * FROM asset_registry_pipelines WHERE pipeline_id = :asset_id", {"asset_id": asset_id})
+        if detail.empty:
+            return None
+        payload = detail.iloc[0].where(pd.notna(detail.iloc[0]), None).to_dict()
+        payload["asset_type"] = "pipeline"
+        return payload
+
+    raise ValueError(f"Unsupported asset_type: {asset_type}")
