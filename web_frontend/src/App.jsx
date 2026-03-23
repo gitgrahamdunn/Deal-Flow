@@ -118,7 +118,7 @@ function App() {
   const [viewportToken, setViewportToken] = useState(0);
   const [filters, setFilters] = useState({
     assetTypes: {
-      wells: false,
+      wells: true,
       facilities: true,
       pipelines: true,
     },
@@ -275,7 +275,7 @@ function App() {
         popupRef.current = new maplibregl.Popup({ closeButton: false, offset: 12 })
           .setLngLat(event.lngLat)
           .setHTML(
-            `<div class="map-popup"><strong>${props.asset_name || props.asset_id}</strong><br/>${props.operator || "Unknown operator"}<br/>${props.status || "Unknown status"}</div>`,
+            `<div class="map-popup"><strong>${props.asset_name || props.asset_id}</strong><br/>${props.operator || "Unknown operator"}<br/>${props.status || "Unknown status"}${props.location_method === "dls_approx" ? "<br/>Approximate DLS location" : ""}</div>`,
           )
           .addTo(map);
 
@@ -350,8 +350,8 @@ function App() {
           <div className="eyebrow">Alberta Upstream Registry</div>
           <h1>Deal Flow Web</h1>
           <p>
-            Facilities and pipelines are map-ready now. Wells are included in the registry and
-            filters, with map geometry to be upgraded when the AER well source lands.
+            Facilities and pipelines use loaded geometry now. Wells are shown with approximate DLS
+            placement until the AER well geometry source lands.
           </p>
         </div>
 
@@ -451,6 +451,7 @@ function App() {
             <div>Visible pipelines: {formatNumber(counts.pipelines)}</div>
             <div>Visible wells: {formatNumber(counts.wells)}</div>
           </div>
+          <div className="chip">Well points are approximate for now</div>
         </section>
 
         <section className="panel scroll-panel">

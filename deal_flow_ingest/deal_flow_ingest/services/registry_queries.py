@@ -13,6 +13,8 @@ from deal_flow_ingest.db.schema import get_engine
 ALLOWED_ASSET_TYPES = {"wells", "facilities", "pipelines"}
 DEFAULT_LIMIT_PER_LAYER = 50000
 MAX_LIMIT_PER_LAYER = 100000
+APPROX_LAT_DEGREES_PER_MILE = 1.0 / 69.172
+APPROX_LON_DEGREES_PER_MILE = 1.0 / 44.5
 
 
 @dataclass(slots=True)
@@ -112,17 +114,30 @@ def _append_common_filters(
 
 
 def _get_wells_layer(filters: RegistryMapFilters) -> pd.DataFrame:
-    clauses = ["w.lat IS NOT NULL", "w.lon IS NOT NULL"]
+    clauses = ["w.display_lat IS NOT NULL", "w.display_lon IS NOT NULL"]
     params: dict[str, object] = {"limit": filters.limit_per_layer}
-    _append_common_filters(
-        clauses,
-        params,
-        alias="w",
-        status_column="status",
-        lat_column="lat",
-        lon_column="lon",
-        filters=filters,
-    )
+    if filters.operator:
+        clauses.append("w.operator = :operator")
+        params["operator"] = filters.operator
+    if filters.statuses:
+        placeholders = []
+        for idx, status in enumerate(filters.statuses):
+            key = f"status_{idx}"
+            placeholders.append(f":{key}")
+            params[key] = status
+        clauses.append(f"w.status IN ({', '.join(placeholders)})")
+    if filters.min_lat is not None:
+        clauses.append("w.display_lat >= :min_lat")
+        params["min_lat"] = filters.min_lat
+    if filters.max_lat is not None:
+        clauses.append("w.display_lat <= :max_lat")
+        params["max_lat"] = filters.max_lat
+    if filters.min_lon is not None:
+        clauses.append("w.display_lon >= :min_lon")
+        params["min_lon"] = filters.min_lon
+    if filters.max_lon is not None:
+        clauses.append("w.display_lon <= :max_lon")
+        params["max_lon"] = filters.max_lon
     if filters.candidate_only:
         clauses.append("(seller.operator IS NOT NULL OR restart.well_id IS NOT NULL)")
 
@@ -134,6 +149,71 @@ def _get_wells_layer(filters: RegistryMapFilters) -> pd.DataFrame:
     restart AS (
         SELECT DISTINCT well_id
         FROM restart_well_candidates
+    ),
+    wells_with_display AS (
+        SELECT
+            base.*,
+            COALESCE(base.lat, base.approx_lat) AS display_lat,
+            COALESCE(base.lon, base.approx_lon) AS display_lon,
+            CASE
+                WHEN base.lat IS NOT NULL AND base.lon IS NOT NULL THEN 'surveyed'
+                WHEN base.approx_lat IS NOT NULL AND base.approx_lon IS NOT NULL THEN 'dls_approx'
+                ELSE NULL
+            END AS location_method
+        FROM (
+            SELECT
+                w.*,
+                CASE
+                    WHEN w.section IS NULL OR w.township IS NULL OR w.range IS NULL OR w.meridian IS NULL THEN NULL
+                    ELSE
+                        49.0
+                        + (
+                            ((w.township - 1) * 6.0)
+                            + CAST(((w.section - 1) / 6) AS INTEGER)
+                            + CASE
+                                WHEN CAST(w.lsd AS INTEGER) BETWEEN 1 AND 16
+                                THEN (CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER) * 0.25) + 0.125
+                                ELSE 0.5
+                              END
+                        ) * {APPROX_LAT_DEGREES_PER_MILE}
+                END AS approx_lat,
+                CASE
+                    WHEN w.section IS NULL OR w.township IS NULL OR w.range IS NULL OR w.meridian IS NULL THEN NULL
+                    ELSE
+                        (
+                            CASE
+                                WHEN w.meridian = 1 THEN -97.4578917
+                                WHEN w.meridian = 2 THEN -102.0
+                                WHEN w.meridian = 3 THEN -106.0
+                                WHEN w.meridian = 4 THEN -110.0
+                                WHEN w.meridian = 5 THEN -114.0
+                                WHEN w.meridian = 6 THEN -118.0
+                                WHEN w.meridian = 7 THEN -122.0
+                                ELSE NULL
+                            END
+                        )
+                        - (
+                            ((w.range - 1) * 6.0)
+                            + CASE
+                                WHEN MOD(CAST(((w.section - 1) / 6) AS INTEGER), 2) = 0
+                                THEN (w.section - (CAST(((w.section - 1) / 6) AS INTEGER) * 6) - 1)
+                                ELSE (6 - (w.section - (CAST(((w.section - 1) / 6) AS INTEGER) * 6)))
+                              END
+                            + CASE
+                                WHEN CAST(w.lsd AS INTEGER) BETWEEN 1 AND 16
+                                THEN (
+                                    CASE
+                                        WHEN MOD(CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER), 2) = 0
+                                        THEN (CAST(w.lsd AS INTEGER) - (CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER) * 4) - 1) * 0.25 + 0.125
+                                        ELSE (4 - (CAST(w.lsd AS INTEGER) - (CAST(((CAST(w.lsd AS INTEGER) - 1) / 4) AS INTEGER) * 4))) * 0.25 + 0.125
+                                    END
+                                )
+                                ELSE 0.5
+                              END
+                        ) * {APPROX_LON_DEGREES_PER_MILE}
+                END AS approx_lon
+            FROM asset_registry_wells w
+        ) base
     )
     SELECT
         'well' AS asset_type,
@@ -142,15 +222,16 @@ def _get_wells_layer(filters: RegistryMapFilters) -> pd.DataFrame:
         w.license_number,
         w.operator,
         w.status,
-        w.lat,
-        w.lon,
+        w.display_lat AS lat,
+        w.display_lon AS lon,
         w.field_name,
         w.pool_name,
         w.restart_score,
+        w.location_method,
         CASE WHEN seller.operator IS NOT NULL THEN 1 ELSE 0 END AS candidate_operator,
         CASE WHEN restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_restart,
         CASE WHEN seller.operator IS NOT NULL OR restart.well_id IS NOT NULL THEN 1 ELSE 0 END AS candidate_any
-    FROM asset_registry_wells w
+    FROM wells_with_display w
     LEFT JOIN seller
         ON seller.operator = w.operator
     LEFT JOIN restart

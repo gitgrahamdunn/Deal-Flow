@@ -2,9 +2,12 @@ import os
 from argparse import Namespace
 from pathlib import Path
 
+from sqlalchemy import text
+
 from deal_flow_ingest.apply_saved_sql import apply_saved_sql
 from deal_flow_ingest.cli import run_ingestion
 from deal_flow_ingest.config import get_default_config_path
+from deal_flow_ingest.db.schema import get_engine
 from deal_flow_ingest.services.registry_queries import (
     MAX_LIMIT_PER_LAYER,
     RegistryMapFilters,
@@ -38,6 +41,9 @@ def test_registry_map_layers_support_operator_and_candidate_filters(tmp_path: Pa
     assert not alpha_layers["facilities"].empty
     assert alpha_layers["wells"]["operator"].eq("ALPHA ENERGY LTD").all()
     assert alpha_layers["facilities"]["operator"].eq("ALPHA ENERGY LTD").all()
+    assert alpha_layers["wells"]["location_method"].isin(["surveyed", "dls_approx"]).all()
+    assert alpha_layers["wells"]["lat"].notna().all()
+    assert alpha_layers["wells"]["lon"].notna().all()
     assert alpha_layers["pipelines"].empty
 
     candidate_pipelines = get_registry_map_layers(RegistryMapFilters(asset_types=("pipelines",), candidate_only=True))
@@ -55,6 +61,22 @@ def test_registry_map_layers_support_bbox_and_combined_frame(tmp_path: Path) -> 
     assert set(combined["asset_type"]).issubset({"well", "facility", "pipeline"})
     assert combined["lat"].between(52.09, 52.15).all()
     assert combined["lon"].between(-114.02, -113.98).all()
+
+
+def test_registry_wells_fall_back_to_dls_display_locations(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+    engine = get_engine(os.environ["DATABASE_URL"])
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE dim_well SET lat = NULL, lon = NULL"))
+
+    layers = get_registry_map_layers(RegistryMapFilters(asset_types=("wells",)))
+
+    assert not layers["wells"].empty
+    assert "location_method" in layers["wells"].columns
+    assert layers["wells"]["location_method"].eq("dls_approx").any()
+    approx_rows = layers["wells"].loc[layers["wells"]["location_method"] == "dls_approx"]
+    assert approx_rows["lat"].between(49.0, 61.0).all()
+    assert approx_rows["lon"].between(-121.0, -109.0).all()
 
 
 def test_registry_filter_options_expose_frontend_choices(tmp_path: Path) -> None:
