@@ -1,6 +1,4 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
-import wellknown from "wellknown";
 import {
   getAssetDetail,
   getFilterOptions,
@@ -61,15 +59,15 @@ function toPointFeatures(rows) {
   };
 }
 
-function toLineFeatures(rows) {
+function toLineFeatures(rows, wellknownLib) {
   return {
     type: "FeatureCollection",
     features: rows
       .map((row) => {
-        if (!row.geometry_wkt) {
+        if (!row.geometry_wkt || !wellknownLib) {
           return null;
         }
-        const geometry = wellknown.parse(row.geometry_wkt);
+        const geometry = wellknownLib.parse(row.geometry_wkt);
         if (!geometry) {
           return null;
         }
@@ -98,14 +96,14 @@ function buildAssetKey(assetType, assetId) {
   return `${assetType}:${assetId}`;
 }
 
-function getBoundsForRows(rows) {
+function getBoundsForRows(rows, maplibreLib) {
   const points = rows
     .filter((row) => row.lon !== null && row.lat !== null)
     .map((row) => [Number(row.lon), Number(row.lat)]);
   if (!points.length) {
     return null;
   }
-  const bounds = new maplibregl.LngLatBounds(points[0], points[0]);
+  const bounds = new maplibreLib.LngLatBounds(points[0], points[0]);
   points.slice(1).forEach((point) => bounds.extend(point));
   return bounds;
 }
@@ -134,11 +132,85 @@ function getLayerLimit(map, filters) {
   return 4000;
 }
 
+function readUrlState() {
+  const params = new URLSearchParams(window.location.search);
+  const layers = new Set((params.get("layers") || "wells,facilities,pipelines").split(",").filter(Boolean));
+  const selectedRaw = params.get("selected") || "";
+  const [selectedType, ...selectedIdParts] = selectedRaw.split(":");
+  return {
+    filters: {
+      assetTypes: {
+        wells: layers.has("wells"),
+        facilities: layers.has("facilities"),
+        pipelines: layers.has("pipelines"),
+      },
+      operator: params.get("operator") || "",
+      statuses: params.get("status") || "",
+      candidateOnly: params.get("candidate") === "1",
+    },
+    mapView: {
+      center: [
+        Number(params.get("lon")) || DEFAULT_CENTER[0],
+        Number(params.get("lat")) || DEFAULT_CENTER[1],
+      ],
+      zoom: Number(params.get("z")) || DEFAULT_ZOOM,
+    },
+    selectedAsset:
+      selectedType && selectedIdParts.length
+        ? { assetType: selectedType, assetId: selectedIdParts.join(":") }
+        : null,
+  };
+}
+
+function writeUrlState({ filters, selectedAsset, map }) {
+  const params = new URLSearchParams(window.location.search);
+  const activeLayers = Object.entries(filters.assetTypes)
+    .filter(([, active]) => active)
+    .map(([key]) => key);
+  if (activeLayers.length) {
+    params.set("layers", activeLayers.join(","));
+  } else {
+    params.delete("layers");
+  }
+  if (filters.operator) {
+    params.set("operator", filters.operator);
+  } else {
+    params.delete("operator");
+  }
+  if (filters.statuses) {
+    params.set("status", filters.statuses);
+  } else {
+    params.delete("status");
+  }
+  if (filters.candidateOnly) {
+    params.set("candidate", "1");
+  } else {
+    params.delete("candidate");
+  }
+  if (selectedAsset) {
+    params.set("selected", `${selectedAsset.assetType}:${selectedAsset.assetId}`);
+  } else {
+    params.delete("selected");
+  }
+  if (map) {
+    const center = map.getCenter();
+    params.set("lat", center.lat.toFixed(5));
+    params.set("lon", center.lng.toFixed(5));
+    params.set("z", map.getZoom().toFixed(2));
+  }
+  const next = `${window.location.pathname}?${params.toString()}`;
+  window.history.replaceState({}, "", next);
+}
+
 function App() {
+  const initialUrlState = useMemo(() => readUrlState(), []);
   const mapNodeRef = useRef(null);
   const mapRef = useRef(null);
   const popupRef = useRef(null);
   const mapRequestRef = useRef({ id: 0, controller: null, timer: null });
+  const maplibreRef = useRef(null);
+  const wellknownRef = useRef(null);
+  const initialSelectionRef = useRef(initialUrlState.selectedAsset);
 
   const [summary, setSummary] = useState(null);
   const [options, setOptions] = useState({
@@ -152,7 +224,7 @@ function App() {
   const [sellerRows, setSellerRows] = useState([]);
   const [packageRows, setPackageRows] = useState([]);
   const [detail, setDetail] = useState(null);
-  const [selectedAsset, setSelectedAsset] = useState(null);
+  const [selectedAsset, setSelectedAsset] = useState(initialUrlState.selectedAsset);
   const [error, setError] = useState("");
   const [loadingMap, setLoadingMap] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -161,16 +233,7 @@ function App() {
   const [pendingFocus, setPendingFocus] = useState(null);
   const [candidateQuery, setCandidateQuery] = useState("");
   const [wellLoadingState, setWellLoadingState] = useState("full");
-  const [filters, setFilters] = useState({
-    assetTypes: {
-      wells: true,
-      facilities: true,
-      pipelines: true,
-    },
-    operator: "",
-    statuses: "",
-    candidateOnly: false,
-  });
+  const [filters, setFilters] = useState(initialUrlState.filters);
 
   const activeAssetTypes = useMemo(
     () =>
@@ -243,21 +306,37 @@ function App() {
   }, []);
 
   useEffect(() => {
+    writeUrlState({ filters, selectedAsset, map: mapRef.current });
+  }, [filters, selectedAsset, viewportToken]);
+
+  useEffect(() => {
     if (mapRef.current || !mapNodeRef.current) {
       return undefined;
     }
+    let disposed = false;
+    let createdMap = null;
 
-    const map = new maplibregl.Map({
-      container: mapNodeRef.current,
-      style: rasterStyle,
-      center: DEFAULT_CENTER,
-      zoom: DEFAULT_ZOOM,
-      attributionControl: true,
-    });
-    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
-    mapRef.current = map;
+    Promise.all([import("maplibre-gl"), import("wellknown")]).then(([maplibreModule, wellknownModule]) => {
+      if (disposed || !mapNodeRef.current) {
+        return;
+      }
+      const maplibreLib = maplibreModule.default;
+      const wellknownLib = wellknownModule.default || wellknownModule;
+      maplibreRef.current = maplibreLib;
+      wellknownRef.current = wellknownLib;
 
-    map.on("load", () => {
+      const map = new maplibreLib.Map({
+        container: mapNodeRef.current,
+        style: rasterStyle,
+        center: initialUrlState.mapView.center,
+        zoom: initialUrlState.mapView.zoom,
+        attributionControl: true,
+      });
+      createdMap = map;
+      map.addControl(new maplibreLib.NavigationControl({ visualizePitch: true }), "top-right");
+      mapRef.current = map;
+
+      map.on("load", () => {
       map.addSource("facilities", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -507,7 +586,7 @@ function App() {
         if (popupRef.current) {
           popupRef.current.remove();
         }
-        popupRef.current = new maplibregl.Popup({ closeButton: false, offset: 12 })
+        popupRef.current = new maplibreLib.Popup({ closeButton: false, offset: 12 })
           .setLngLat(event.lngLat)
           .setHTML(
             `<div class="map-popup"><strong>${props.asset_name || props.asset_id}</strong><br/>${props.operator || "Unknown operator"}<br/>${props.status || "Unknown status"}${props.location_method === "dls_approx" ? "<br/>Approximate DLS location" : ""}${Number(props.is_aggregate) === 1 ? "<br/>Zoom in for individual wells" : ""}</div>`,
@@ -527,16 +606,31 @@ function App() {
 
       setMapReady(true);
     });
+    });
 
     return () => {
+      disposed = true;
       if (mapRequestRef.current.timer) {
         window.clearTimeout(mapRequestRef.current.timer);
       }
       mapRequestRef.current.controller?.abort();
-      map.remove();
+      createdMap?.remove();
       mapRef.current = null;
     };
-  }, []);
+  }, [initialUrlState.mapView.center, initialUrlState.mapView.zoom]);
+
+  useEffect(() => {
+    if (!mapReady || !initialSelectionRef.current) {
+      return;
+    }
+    const selection = initialSelectionRef.current;
+    initialSelectionRef.current = null;
+    setLoadingDetail(true);
+    getAssetDetail(selection.assetType, selection.assetId)
+      .then((payload) => setDetail(payload))
+      .catch((err) => setError(`Failed to load asset detail: ${err.message}`))
+      .finally(() => setLoadingDetail(false));
+  }, [mapReady]);
 
   useEffect(() => {
     if (!mapRef.current || !mapReady) {
@@ -578,7 +672,7 @@ function App() {
           });
           map.getSource("facilities")?.setData(toPointFeatures(payload.layers.facilities || []));
           map.getSource("wells")?.setData(toPointFeatures(payload.layers.wells || []));
-          map.getSource("pipelines")?.setData(toLineFeatures(payload.layers.pipelines || []));
+          map.getSource("pipelines")?.setData(toLineFeatures(payload.layers.pipelines || [], wellknownRef.current));
           setError("");
         })
         .catch((err) => {
@@ -608,7 +702,7 @@ function App() {
       return;
     }
     if (selectedRow.asset_type === "pipeline" && selectedRow.geometry_wkt) {
-      const geometry = wellknown.parse(selectedRow.geometry_wkt);
+      const geometry = wellknownRef.current?.parse(selectedRow.geometry_wkt);
       lineSource?.setData({
         type: "FeatureCollection",
         features: geometry
@@ -653,7 +747,10 @@ function App() {
       }
       return true;
     });
-    const bounds = getBoundsForRows(rows);
+    if (!maplibreRef.current) {
+      return;
+    }
+    const bounds = getBoundsForRows(rows, maplibreRef.current);
     if (bounds) {
       mapRef.current.fitBounds(bounds, { padding: 72, duration: 700, maxZoom: pendingFocus.maxZoom || 11 });
       setPendingFocus(null);
@@ -897,6 +994,80 @@ function App() {
                   <strong>{formatNumber(detail.field_name || detail.facility_type || detail.substance1)}</strong>
                 </div>
               </div>
+
+              <section className="detail-section">
+                <h3>Context</h3>
+                <div className="detail-grid">
+                  <div>
+                    <span>Location Source</span>
+                    <strong>{formatNumber(detail.location?.location_method)}</strong>
+                  </div>
+                  <div>
+                    <span>Seller Candidate</span>
+                    <strong>{detail.candidate_flags?.seller_candidate ? "Yes" : "No"}</strong>
+                  </div>
+                  <div>
+                    <span>Restart Candidate</span>
+                    <strong>{detail.candidate_flags?.restart_candidate ? "Yes" : "No"}</strong>
+                  </div>
+                  <div>
+                    <span>Coordinates</span>
+                    <strong>
+                      {detail.location?.lat !== null && detail.location?.lat !== undefined && detail.location?.lon !== null && detail.location?.lon !== undefined
+                        ? `${Number(detail.location.lat).toFixed(4)}, ${Number(detail.location.lon).toFixed(4)}`
+                        : "n/a"}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              {detail.production_summary ? (
+                <section className="detail-section">
+                  <h3>Production Summary</h3>
+                  <div className="detail-grid">
+                    <div>
+                      <span>Latest Month</span>
+                      <strong>{formatNumber(detail.production_summary.latest_month)}</strong>
+                    </div>
+                    <div>
+                      <span>Active Months</span>
+                      <strong>{formatNumber(detail.production_summary.active_months)}</strong>
+                    </div>
+                    <div>
+                      <span>Oil</span>
+                      <strong>{formatNumber(detail.production_summary.oil_bbl_total)}</strong>
+                    </div>
+                    <div>
+                      <span>Gas</span>
+                      <strong>{formatNumber(detail.production_summary.gas_mcf_total)}</strong>
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+
+              {detail.operator_metrics ? (
+                <section className="detail-section">
+                  <h3>Operator Metrics</h3>
+                  <div className="detail-grid">
+                    <div>
+                      <span>As Of</span>
+                      <strong>{formatNumber(detail.operator_metrics.as_of_date)}</strong>
+                    </div>
+                    <div>
+                      <span>30d Oil BPD</span>
+                      <strong>{formatNumber(detail.operator_metrics.avg_oil_bpd_30d)}</strong>
+                    </div>
+                    <div>
+                      <span>Restart Upside</span>
+                      <strong>{formatNumber(detail.operator_metrics.restart_upside_bpd_est)}</strong>
+                    </div>
+                    <div>
+                      <span>Suspended Wells</span>
+                      <strong>{formatNumber(detail.operator_metrics.suspended_wells_count)}</strong>
+                    </div>
+                  </div>
+                </section>
+              ) : null}
 
               {detail.linked_facilities?.length ? (
                 <section className="detail-section">

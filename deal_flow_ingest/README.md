@@ -132,6 +132,30 @@ dealflow web --host 0.0.0.0 --port 8000
 
 If `web_frontend/dist` exists, the FastAPI app serves the built frontend directly.
 
+Shareable web views:
+
+- Filters, active layers, selected asset, and map center/zoom are persisted in the URL.
+- Low-zoom well views are aggregated server-side for Alberta-wide browsing.
+- True well geometry will replace approximate DLS placement automatically when the richer AER well source is loaded.
+
+Basic auth:
+
+```bash
+export DEALFLOW_WEB_USERNAME=dealflow
+export DEALFLOW_WEB_PASSWORD=change-me
+dealflow web --host 0.0.0.0 --port 8000
+```
+
+The app protects the UI and API with HTTP basic auth when both env vars are set. `/api/health` remains open for liveness checks.
+
+Containerized self-hosted deployment:
+
+```bash
+cp .env.web.example .env.web
+docker compose -f docker-compose.postgres.yml up -d
+docker compose -f docker-compose.web.yml up -d --build
+```
+
 ## Recommended live workflow
 
 ```bash

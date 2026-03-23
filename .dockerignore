@@ -1,0 +1,12 @@
+.git
+.venv
+node_modules
+web_frontend/node_modules
+web_frontend/dist
+data
+output
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info

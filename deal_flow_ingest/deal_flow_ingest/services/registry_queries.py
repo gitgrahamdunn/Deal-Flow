@@ -578,6 +578,91 @@ def get_registry_summary() -> dict[str, int]:
     return {key: int(value or 0) for key, value in row.items()}
 
 
+def _get_operator_metrics(operator: str | None) -> dict[str, object] | None:
+    if not operator:
+        return None
+    metrics = _read_frame(
+        """
+        SELECT
+            fm.as_of_date,
+            fm.avg_oil_bpd_30d,
+            fm.avg_oil_bpd_365d,
+            fm.yoy_change_pct,
+            fm.decline_score,
+            fm.distress_score,
+            fm.suspended_wells_count,
+            fm.restart_candidates_count,
+            fm.restart_upside_bpd_est
+        FROM fact_operator_metrics fm
+        JOIN dim_operator o
+            ON o.operator_id = fm.operator_id
+        WHERE o.name_norm = :operator
+        ORDER BY fm.as_of_date DESC
+        LIMIT 1
+        """,
+        {"operator": operator},
+    )
+    if metrics.empty:
+        return None
+    return metrics.iloc[0].where(pd.notna(metrics.iloc[0]), None).to_dict()
+
+
+def _get_well_production_summary(well_id: str) -> dict[str, object] | None:
+    summary = _read_frame(
+        """
+        SELECT
+            MAX(month) AS latest_month,
+            COUNT(*) AS active_months,
+            SUM(COALESCE(oil_bbl, 0)) AS oil_bbl_total,
+            SUM(COALESCE(gas_mcf, 0)) AS gas_mcf_total,
+            SUM(COALESCE(water_bbl, 0)) AS water_bbl_total,
+            MAX(CASE WHEN is_estimated THEN 1 ELSE 0 END) AS has_estimated
+        FROM fact_well_production_monthly
+        WHERE well_id = :well_id
+        """,
+        {"well_id": well_id},
+    )
+    if summary.empty:
+        return None
+    payload = summary.iloc[0].where(pd.notna(summary.iloc[0]), None).to_dict()
+    if not payload.get("latest_month"):
+        return None
+    return payload
+
+
+def _get_facility_production_summary(facility_id: str) -> dict[str, object] | None:
+    summary = _read_frame(
+        """
+        SELECT
+            MAX(month) AS latest_month,
+            COUNT(*) AS active_months,
+            SUM(COALESCE(oil_bbl, 0)) AS oil_bbl_total,
+            SUM(COALESCE(gas_mcf, 0)) AS gas_mcf_total,
+            SUM(COALESCE(water_bbl, 0)) AS water_bbl_total,
+            SUM(COALESCE(condensate_bbl, 0)) AS condensate_bbl_total
+        FROM fact_facility_production_monthly
+        WHERE facility_id = :facility_id
+        """,
+        {"facility_id": facility_id},
+    )
+    if summary.empty:
+        return None
+    payload = summary.iloc[0].where(pd.notna(summary.iloc[0]), None).to_dict()
+    if not payload.get("latest_month"):
+        return None
+    return payload
+
+
+def _is_seller_candidate(operator: str | None) -> bool:
+    if not operator:
+        return False
+    frame = _read_frame(
+        "SELECT 1 AS matched FROM seller_theses WHERE operator = :operator LIMIT 1",
+        {"operator": operator},
+    )
+    return not frame.empty
+
+
 def get_asset_detail(asset_type: str, asset_id: str) -> dict[str, object] | None:
     normalized = asset_type.strip().lower()
     if normalized == "well":
@@ -602,6 +687,17 @@ def get_asset_detail(asset_type: str, asset_id: str) -> dict[str, object] | None
         )
         payload = detail.iloc[0].where(pd.notna(detail.iloc[0]), None).to_dict()
         payload["linked_facilities"] = links.where(pd.notna(links), None).to_dict(orient="records")
+        payload["production_summary"] = _get_well_production_summary(asset_id)
+        payload["operator_metrics"] = _get_operator_metrics(payload.get("operator"))
+        payload["candidate_flags"] = {
+            "seller_candidate": _is_seller_candidate(payload.get("operator")),
+            "restart_candidate": bool(payload.get("restart_score")),
+        }
+        payload["location"] = {
+            "lat": payload.get("lat"),
+            "lon": payload.get("lon"),
+            "location_method": "surveyed" if payload.get("lat") is not None and payload.get("lon") is not None else "dls_approx",
+        }
         payload["asset_type"] = "well"
         return payload
 
@@ -628,6 +724,17 @@ def get_asset_detail(asset_type: str, asset_id: str) -> dict[str, object] | None
         )
         payload = detail.iloc[0].where(pd.notna(detail.iloc[0]), None).to_dict()
         payload["linked_wells"] = links.where(pd.notna(links), None).to_dict(orient="records")
+        payload["production_summary"] = _get_facility_production_summary(asset_id)
+        payload["operator_metrics"] = _get_operator_metrics(payload.get("operator"))
+        payload["candidate_flags"] = {
+            "seller_candidate": _is_seller_candidate(payload.get("operator")),
+            "restart_candidate": any(item.get("restart_score") for item in payload["linked_wells"]),
+        }
+        payload["location"] = {
+            "lat": payload.get("lat"),
+            "lon": payload.get("lon"),
+            "location_method": "surveyed" if payload.get("lat") is not None and payload.get("lon") is not None else "missing",
+        }
         payload["asset_type"] = "facility"
         return payload
 
@@ -636,6 +743,16 @@ def get_asset_detail(asset_type: str, asset_id: str) -> dict[str, object] | None
         if detail.empty:
             return None
         payload = detail.iloc[0].where(pd.notna(detail.iloc[0]), None).to_dict()
+        payload["operator_metrics"] = _get_operator_metrics(payload.get("operator"))
+        payload["candidate_flags"] = {
+            "seller_candidate": _is_seller_candidate(payload.get("operator")),
+            "restart_candidate": False,
+        }
+        payload["location"] = {
+            "lat": payload.get("centroid_lat"),
+            "lon": payload.get("centroid_lon"),
+            "location_method": "surveyed" if payload.get("centroid_lat") is not None and payload.get("centroid_lon") is not None else "missing",
+        }
         payload["asset_type"] = "pipeline"
         return payload
 

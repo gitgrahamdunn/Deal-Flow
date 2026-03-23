@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
+import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from deal_flow_ingest.services.registry_queries import (
@@ -26,8 +28,31 @@ def _frame_to_records(frame):
     return frame.where(frame.notna(), None).to_dict(orient="records")
 
 
+def _get_basic_auth_credentials() -> tuple[str, str] | None:
+    username = os.getenv("DEALFLOW_WEB_USERNAME", "").strip()
+    password = os.getenv("DEALFLOW_WEB_PASSWORD", "").strip()
+    if not username or not password:
+        return None
+    return username, password
+
+
+def _is_authorized(request: Request, credentials: tuple[str, str] | None) -> bool:
+    if credentials is None or request.url.path == "/api/health":
+        return True
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header.split(" ", 1)[1]).decode("utf-8")
+    except Exception:  # pragma: no cover - malformed auth header
+        return False
+    username, _, password = decoded.partition(":")
+    return (username, password) == credentials
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Deal Flow Web API", version="0.1.0")
+    credentials = _get_basic_auth_credentials()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -36,9 +61,19 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def basic_auth_guard(request: Request, call_next):  # noqa: ANN001
+        if _is_authorized(request, credentials):
+            return await call_next(request)
+        return JSONResponse(
+            {"detail": "Authentication required"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="dealflow"'},
+        )
+
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        return {"status": "ok", "frontend_built": _frontend_dist_dir().exists()}
+        return {"status": "ok", "frontend_built": _frontend_dist_dir().exists(), "auth_enabled": credentials is not None}
 
     @app.get("/api/summary")
     def summary() -> dict[str, int]:

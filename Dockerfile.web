@@ -1,0 +1,24 @@
+FROM node:22-alpine AS frontend-build
+
+WORKDIR /app/web_frontend
+COPY web_frontend/package.json web_frontend/package-lock.json ./
+RUN npm ci
+COPY web_frontend/ ./
+RUN npm run build
+
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY deal_flow_ingest/ /app/deal_flow_ingest/
+COPY sql/ /app/sql/
+COPY --from=frontend-build /app/web_frontend/dist /app/web_frontend/dist
+
+RUN pip install --no-cache-dir -e /app/deal_flow_ingest
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "deal_flow_ingest.web.api:app", "--host", "0.0.0.0", "--port", "8000"]

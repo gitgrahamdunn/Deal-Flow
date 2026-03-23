@@ -14,6 +14,7 @@ from deal_flow_ingest.services.registry_queries import (
     LOW_ZOOM_WELL_AGGREGATION_THRESHOLD,
     MAX_LIMIT_PER_LAYER,
     RegistryMapFilters,
+    get_asset_detail,
     get_combined_registry_map_frame,
     get_registry_filter_options,
     get_registry_map_layers,
@@ -177,3 +178,21 @@ def test_registry_filters_reject_invalid_ranges_and_asset_types(tmp_path: Path) 
         assert "min_lat cannot be greater than max_lat" in str(exc)
     else:  # pragma: no cover - explicit failure path
         raise AssertionError("Expected invalid latitude bounds to raise ValueError")
+
+
+def test_asset_detail_includes_operating_context(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+
+    well_id = get_registry_map_layers(RegistryMapFilters(asset_types=("wells",)))["wells"].iloc[0]["asset_id"]
+    facility_id = get_registry_map_layers(RegistryMapFilters(asset_types=("facilities",)))["facilities"].iloc[0]["asset_id"]
+
+    well_detail = get_asset_detail("well", well_id)
+    facility_detail = get_asset_detail("facility", facility_id)
+
+    assert well_detail["production_summary"] is not None
+    assert "oil_bbl_total" in well_detail["production_summary"]
+    assert "candidate_flags" in well_detail
+    assert "location" in well_detail
+    assert facility_detail["production_summary"] is not None
+    assert "operator_metrics" in facility_detail
+    assert "candidate_flags" in facility_detail

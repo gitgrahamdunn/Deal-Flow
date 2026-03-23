@@ -1,0 +1,11 @@
+services:
+  dealflow-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: dealflow-web
+    env_file:
+      - .env.web
+    ports:
+      - "${DEALFLOW_WEB_PORT:-8000}:8000"
+    restart: unless-stopped

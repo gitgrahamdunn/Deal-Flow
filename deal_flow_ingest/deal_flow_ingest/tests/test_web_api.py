@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 import pandas as pd
 from fastapi.testclient import TestClient
 
@@ -7,6 +9,8 @@ from deal_flow_ingest.web.api import create_app
 
 
 def test_web_api_endpoints(monkeypatch) -> None:
+    monkeypatch.delenv("DEALFLOW_WEB_USERNAME", raising=False)
+    monkeypatch.delenv("DEALFLOW_WEB_PASSWORD", raising=False)
     captured = {}
 
     def fake_map_layers(_filters):
@@ -87,6 +91,8 @@ def test_web_api_endpoints(monkeypatch) -> None:
 
 
 def test_web_api_not_found(monkeypatch) -> None:
+    monkeypatch.delenv("DEALFLOW_WEB_USERNAME", raising=False)
+    monkeypatch.delenv("DEALFLOW_WEB_PASSWORD", raising=False)
     monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_summary", lambda: {})
     monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_filter_options", lambda: {})
     monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_map_layers", lambda _filters: {})
@@ -98,3 +104,25 @@ def test_web_api_not_found(monkeypatch) -> None:
     response = client.get("/api/assets/well/UNKNOWN")
 
     assert response.status_code == 404
+
+
+def test_web_api_supports_basic_auth(monkeypatch) -> None:
+    monkeypatch.setenv("DEALFLOW_WEB_USERNAME", "dealflow")
+    monkeypatch.setenv("DEALFLOW_WEB_PASSWORD", "secret")
+    monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_summary", lambda: {"wells": 1})
+    monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_filter_options", lambda: {})
+    monkeypatch.setattr("deal_flow_ingest.web.api.get_registry_map_layers", lambda _filters: {})
+    monkeypatch.setattr("deal_flow_ingest.web.api.get_seller_candidates", lambda limit=200, min_score=0.0: pd.DataFrame())
+    monkeypatch.setattr("deal_flow_ingest.web.api.get_package_candidates", lambda limit=200, min_score=0.0: pd.DataFrame())
+    monkeypatch.setattr("deal_flow_ingest.web.api.get_asset_detail", lambda asset_type, asset_id: None)
+
+    client = TestClient(create_app())
+    unauthorized = client.get("/api/summary")
+    health = client.get("/api/health")
+    token = base64.b64encode(b"dealflow:secret").decode("ascii")
+    authorized = client.get("/api/summary", headers={"Authorization": f"Basic {token}"})
+
+    assert unauthorized.status_code == 401
+    assert health.status_code == 200
+    assert health.json()["auth_enabled"] is True
+    assert authorized.status_code == 200
