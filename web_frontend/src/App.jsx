@@ -94,6 +94,32 @@ function formatNumber(value) {
   return String(value);
 }
 
+function buildAssetKey(assetType, assetId) {
+  return `${assetType}:${assetId}`;
+}
+
+function getBoundsForRows(rows) {
+  const points = rows
+    .filter((row) => row.lon !== null && row.lat !== null)
+    .map((row) => [Number(row.lon), Number(row.lat)]);
+  if (!points.length) {
+    return null;
+  }
+  const bounds = new maplibregl.LngLatBounds(points[0], points[0]);
+  points.slice(1).forEach((point) => bounds.extend(point));
+  return bounds;
+}
+
+function getSelectedRow(layers, selectedAsset) {
+  if (!selectedAsset) {
+    return null;
+  }
+  const rows = Object.values(layers).flat();
+  return rows.find(
+    (row) => row.asset_type === selectedAsset.assetType && String(row.asset_id) === String(selectedAsset.assetId),
+  );
+}
+
 function App() {
   const mapNodeRef = useRef(null);
   const mapRef = useRef(null);
@@ -111,11 +137,14 @@ function App() {
   const [sellerRows, setSellerRows] = useState([]);
   const [packageRows, setPackageRows] = useState([]);
   const [detail, setDetail] = useState(null);
+  const [selectedAsset, setSelectedAsset] = useState(null);
   const [error, setError] = useState("");
   const [loadingMap, setLoadingMap] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [mapReady, setMapReady] = useState(false);
   const [viewportToken, setViewportToken] = useState(0);
+  const [pendingFocus, setPendingFocus] = useState(null);
+  const [candidateQuery, setCandidateQuery] = useState("");
   const [filters, setFilters] = useState({
     assetTypes: {
       wells: true,
@@ -133,6 +162,37 @@ function App() {
         .filter(([, active]) => active)
         .map(([key]) => key),
     [filters.assetTypes],
+  );
+
+  const filteredSellerRows = useMemo(() => {
+    const query = candidateQuery.trim().toLowerCase();
+    if (!query) {
+      return sellerRows;
+    }
+    return sellerRows.filter(
+      (row) =>
+        String(row.operator || "")
+          .toLowerCase()
+          .includes(query) || String(row.core_area_key || "").toLowerCase().includes(query),
+    );
+  }, [sellerRows, candidateQuery]);
+
+  const filteredPackageRows = useMemo(() => {
+    const query = candidateQuery.trim().toLowerCase();
+    if (!query) {
+      return packageRows;
+    }
+    return packageRows.filter(
+      (row) =>
+        String(row.operator || "")
+          .toLowerCase()
+          .includes(query) || String(row.area_key || "").toLowerCase().includes(query),
+    );
+  }, [packageRows, candidateQuery]);
+
+  const approximateWellCount = useMemo(
+    () => (layers.wells || []).filter((row) => row.location_method === "dls_approx").length,
+    [layers.wells],
   );
 
   useEffect(() => {
@@ -178,6 +238,8 @@ function App() {
       map.addSource("facilities", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addSource("wells", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addSource("pipelines", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addSource("selection-point", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addSource("selection-line", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
 
       map.addLayer({
         id: "pipelines",
@@ -252,6 +314,45 @@ function App() {
         },
       });
 
+      map.addLayer({
+        id: "selection-line",
+        type: "line",
+        source: "selection-line",
+        paint: {
+          "line-color": "#ffe38a",
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            5,
+            2,
+            10,
+            5,
+          ],
+          "line-opacity": 0.95,
+        },
+      });
+
+      map.addLayer({
+        id: "selection-point",
+        type: "circle",
+        source: "selection-point",
+        paint: {
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            5,
+            4,
+            10,
+            9,
+          ],
+          "circle-color": "#fff7cf",
+          "circle-stroke-color": "#7c1d49",
+          "circle-stroke-width": 2,
+        },
+      });
+
       const handlePointer = (event) => {
         const features = map.queryRenderedFeatures(event.point, {
           layers: ["facilities", "wells", "pipelines"],
@@ -279,6 +380,7 @@ function App() {
           )
           .addTo(map);
 
+        setSelectedAsset({ assetType: props.asset_type, assetId: props.asset_id });
         setLoadingDetail(true);
         getAssetDetail(props.asset_type, props.asset_id)
           .then((payload) => setDetail(payload))
@@ -328,6 +430,94 @@ function App() {
       .catch((err) => setError(`Failed map load: ${err.message}`))
       .finally(() => setLoadingMap(false));
   }, [filters, mapReady, activeAssetTypes, viewportToken]);
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) {
+      return;
+    }
+    const selectedRow = getSelectedRow(layers, selectedAsset);
+    const pointSource = mapRef.current.getSource("selection-point");
+    const lineSource = mapRef.current.getSource("selection-line");
+    if (!selectedRow) {
+      pointSource?.setData({ type: "FeatureCollection", features: [] });
+      lineSource?.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    if (selectedRow.asset_type === "pipeline" && selectedRow.geometry_wkt) {
+      const geometry = wellknown.parse(selectedRow.geometry_wkt);
+      lineSource?.setData({
+        type: "FeatureCollection",
+        features: geometry
+          ? [{ type: "Feature", id: buildAssetKey(selectedRow.asset_type, selectedRow.asset_id), geometry, properties: selectedRow }]
+          : [],
+      });
+      pointSource?.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    if (selectedRow.lon !== null && selectedRow.lat !== null) {
+      pointSource?.setData({
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            id: buildAssetKey(selectedRow.asset_type, selectedRow.asset_id),
+            geometry: { type: "Point", coordinates: [Number(selectedRow.lon), Number(selectedRow.lat)] },
+            properties: selectedRow,
+          },
+        ],
+      });
+      lineSource?.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    pointSource?.setData({ type: "FeatureCollection", features: [] });
+    lineSource?.setData({ type: "FeatureCollection", features: [] });
+  }, [layers, mapReady, selectedAsset]);
+
+  useEffect(() => {
+    if (!mapRef.current || !pendingFocus) {
+      return;
+    }
+    const rows = Object.values(layers).flat().filter((row) => {
+      if (pendingFocus.assetType && row.asset_type !== pendingFocus.assetType) {
+        return false;
+      }
+      if (pendingFocus.operator && row.operator !== pendingFocus.operator) {
+        return false;
+      }
+      if (pendingFocus.assetId && String(row.asset_id) !== String(pendingFocus.assetId)) {
+        return false;
+      }
+      return true;
+    });
+    const bounds = getBoundsForRows(rows);
+    if (bounds) {
+      mapRef.current.fitBounds(bounds, { padding: 72, duration: 700, maxZoom: pendingFocus.maxZoom || 11 });
+      setPendingFocus(null);
+    }
+  }, [layers, pendingFocus]);
+
+  function selectAsset(assetType, assetId, { focus = false } = {}) {
+    setSelectedAsset({ assetType, assetId });
+    if (focus) {
+      setPendingFocus({ assetType, assetId, maxZoom: 12 });
+    }
+    setLoadingDetail(true);
+    getAssetDetail(assetType, assetId)
+      .then((payload) => setDetail(payload))
+      .catch((err) => setError(`Failed to load asset detail: ${err.message}`))
+      .finally(() => setLoadingDetail(false));
+  }
+
+  function applyOperatorFocus(operator, candidateOnly = false) {
+    setSelectedAsset(null);
+    setDetail(null);
+    setPendingFocus({ operator, maxZoom: 10 });
+    setFilters((current) => ({
+      ...current,
+      operator,
+      candidateOnly,
+    }));
+  }
 
   const activeStatusOptions = useMemo(() => {
     const statuses = [];
@@ -410,6 +600,15 @@ function App() {
             </select>
           </label>
 
+          <label className="field">
+            <span>Candidate Search</span>
+            <input
+              value={candidateQuery}
+              placeholder="Operator or area"
+              onChange={(event) => setCandidateQuery(event.target.value)}
+            />
+          </label>
+
           <div className="toggle-group">
             {[
               ["wells", "Wells"],
@@ -451,20 +650,20 @@ function App() {
             <div>Visible pipelines: {formatNumber(counts.pipelines)}</div>
             <div>Visible wells: {formatNumber(counts.wells)}</div>
           </div>
-          <div className="chip">Well points are approximate for now</div>
+          <div className="chip">Approx well points: {formatNumber(approximateWellCount)}</div>
         </section>
 
         <section className="panel scroll-panel">
           <div className="panel-header">
             <h2>Seller Candidates</h2>
-            <span className="chip">{sellerRows.length}</span>
+            <span className="chip">{filteredSellerRows.length}</span>
           </div>
-          {sellerRows.slice(0, 12).map((row) => (
+          {filteredSellerRows.slice(0, 12).map((row) => (
             <button
               type="button"
               key={`${row.operator_id}-${row.core_area_key || "na"}`}
               className="list-card"
-              onClick={() => setFilters((current) => ({ ...current, operator: row.operator }))}
+              onClick={() => applyOperatorFocus(row.operator, false)}
             >
               <strong>{row.operator}</strong>
               <span>{row.thesis_priority} priority</span>
@@ -476,20 +675,14 @@ function App() {
         <section className="panel scroll-panel">
           <div className="panel-header">
             <h2>Package Candidates</h2>
-            <span className="chip">{packageRows.length}</span>
+            <span className="chip">{filteredPackageRows.length}</span>
           </div>
-          {packageRows.slice(0, 12).map((row) => (
+          {filteredPackageRows.slice(0, 12).map((row) => (
             <button
               type="button"
               key={`${row.operator_id}-${row.area_key}`}
               className="list-card"
-              onClick={() =>
-                setFilters((current) => ({
-                  ...current,
-                  operator: row.operator,
-                  candidateOnly: true,
-                }))
-              }
+              onClick={() => applyOperatorFocus(row.operator, true)}
             >
               <strong>{row.operator}</strong>
               <span>{row.area_key}</span>
@@ -543,7 +736,13 @@ function App() {
                   <h3>Linked Facilities</h3>
                   {detail.linked_facilities.slice(0, 20).map((item) => (
                     <div key={item.facility_id} className="detail-list-row">
-                      <strong>{item.facility_name || item.facility_id}</strong>
+                      <button
+                        type="button"
+                        className="detail-link"
+                        onClick={() => selectAsset("facility", item.facility_id, { focus: true })}
+                      >
+                        {item.facility_name || item.facility_id}
+                      </button>
                       <span>{item.facility_status || item.operator || "n/a"}</span>
                     </div>
                   ))}
@@ -555,7 +754,13 @@ function App() {
                   <h3>Linked Wells</h3>
                   {detail.linked_wells.slice(0, 20).map((item) => (
                     <div key={item.well_id} className="detail-list-row">
-                      <strong>{item.well_name || item.well_id}</strong>
+                      <button
+                        type="button"
+                        className="detail-link"
+                        onClick={() => selectAsset("well", item.well_id, { focus: true })}
+                      >
+                        {item.well_name || item.well_id}
+                      </button>
                       <span>{item.status || item.operator || "n/a"}</span>
                     </div>
                   ))}

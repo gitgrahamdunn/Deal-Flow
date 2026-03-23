@@ -159,6 +159,14 @@ input {
   background: rgba(255, 255, 255, 0.82);
 }
 
+.field input {
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(23, 48, 64, 0.15);
+  background: rgba(255, 255, 255, 0.82);
+}
+
 .toggle-group {
   display: flex;
   flex-wrap: wrap;
@@ -210,6 +218,12 @@ input {
   text-align: left;
   cursor: pointer;
   margin-bottom: 0.55rem;
+}
+
+.list-card:hover,
+.toggle:hover,
+.detail-link:hover {
+  filter: brightness(0.98);
 }
 
 .list-card strong {
@@ -273,6 +287,17 @@ input {
 .detail-list-row span {
   color: #5b7382;
   font-size: 0.8rem;
+}
+
+.detail-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  color: #173040;
+  cursor: pointer;
 }
 
 .error-banner {
