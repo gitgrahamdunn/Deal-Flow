@@ -19,6 +19,19 @@ export function getFilterOptions() {
   return fetchJson("/api/map/filters");
 }
 
+export function getOperatorSuggestions(query, limit = 12) {
+  const params = new URLSearchParams();
+  if (query) {
+    params.set("q", query);
+  }
+  params.set("limit", String(limit));
+  return fetchJson(`/api/operators?${params.toString()}`);
+}
+
+export function getOperatorDetail(operator) {
+  return fetchJson(`/api/operators/${encodeURIComponent(operator)}`);
+}
+
 export function getMapAssets(params) {
   const { signal, ...queryParams } = params;
   const query = new URLSearchParams();

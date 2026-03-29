@@ -3,6 +3,8 @@ import {
   getAssetDetail,
   getFilterOptions,
   getMapAssets,
+  getOperatorDetail,
+  getOperatorSuggestions,
   getPackageCandidates,
   getSellerCandidates,
   getSummary,
@@ -214,25 +216,35 @@ function App() {
 
   const [summary, setSummary] = useState(null);
   const [options, setOptions] = useState({
-    operators: [],
     well_statuses: [],
     facility_statuses: [],
     pipeline_statuses: [],
   });
+  const [operatorOptions, setOperatorOptions] = useState([]);
   const [layers, setLayers] = useState({ wells: [], facilities: [], pipelines: [] });
   const [counts, setCounts] = useState({ wells: 0, facilities: 0, pipelines: 0 });
   const [sellerRows, setSellerRows] = useState([]);
   const [packageRows, setPackageRows] = useState([]);
   const [detail, setDetail] = useState(null);
   const [selectedAsset, setSelectedAsset] = useState(initialUrlState.selectedAsset);
+  const [selectedOperator, setSelectedOperator] = useState(
+    initialUrlState.selectedAsset ? "" : initialUrlState.filters.operator,
+  );
+  const [operatorDetail, setOperatorDetail] = useState(null);
   const [error, setError] = useState("");
   const [loadingMap, setLoadingMap] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [loadingOperatorDetail, setLoadingOperatorDetail] = useState(false);
+  const [loadingSummary, setLoadingSummary] = useState(false);
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
   const [mapReady, setMapReady] = useState(false);
   const [viewportToken, setViewportToken] = useState(0);
   const [pendingFocus, setPendingFocus] = useState(null);
   const [candidateQuery, setCandidateQuery] = useState("");
+  const [operatorSearch, setOperatorSearch] = useState(initialUrlState.filters.operator);
   const [wellLoadingState, setWellLoadingState] = useState("full");
+  const [summaryError, setSummaryError] = useState("");
+  const [candidateError, setCandidateError] = useState("");
   const [filters, setFilters] = useState(initialUrlState.filters);
 
   const activeAssetTypes = useMemo(
@@ -283,21 +295,50 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getSummary(), getFilterOptions(), getSellerCandidates(), getPackageCandidates()])
-      .then(([summaryPayload, filterPayload, sellerPayload, packagePayload]) => {
-        if (cancelled) {
-          return;
+    getFilterOptions()
+      .then((filterPayload) => {
+        if (!cancelled) {
+          startTransition(() => setOptions(filterPayload));
         }
-        startTransition(() => {
-          setSummary(summaryPayload);
-          setOptions(filterPayload);
-          setSellerRows(sellerPayload.rows);
-          setPackageRows(packagePayload.rows);
-        });
+      })
+      .catch(() => {});
+    setLoadingSummary(true);
+    getSummary()
+      .then((summaryPayload) => {
+        if (!cancelled) {
+          startTransition(() => setSummary(summaryPayload));
+          setSummaryError("");
+        }
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(`Failed initial load: ${err.message}`);
+          setSummaryError(`Summary unavailable: ${err.message}`);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingSummary(false);
+        }
+      });
+    setLoadingCandidates(true);
+    Promise.all([getSellerCandidates(25, 0), getPackageCandidates(25, 0)])
+      .then(([sellerPayload, packagePayload]) => {
+        if (!cancelled) {
+          startTransition(() => {
+            setSellerRows(sellerPayload.rows);
+            setPackageRows(packagePayload.rows);
+          });
+          setCandidateError("");
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setCandidateError(`Candidate panels unavailable: ${err.message}`);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingCandidates(false);
         }
       });
     return () => {
@@ -306,8 +347,60 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      getOperatorSuggestions(operatorSearch, 12)
+        .then((payload) => {
+          if (!cancelled) {
+            setOperatorOptions(payload.rows || []);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setOperatorOptions([]);
+          }
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [operatorSearch]);
+
+  useEffect(() => {
     writeUrlState({ filters, selectedAsset, map: mapRef.current });
   }, [filters, selectedAsset, viewportToken]);
+
+  useEffect(() => {
+    if (!selectedOperator) {
+      setOperatorDetail(null);
+      setLoadingOperatorDetail(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingOperatorDetail(true);
+    getOperatorDetail(selectedOperator)
+      .then((payload) => {
+        if (!cancelled) {
+          setOperatorDetail(payload);
+          setError("");
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setOperatorDetail(null);
+          setError(`Failed to load operator detail: ${err.message}`);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingOperatorDetail(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedOperator]);
 
   useEffect(() => {
     if (mapRef.current || !mapNodeRef.current) {
@@ -770,13 +863,41 @@ function App() {
   }
 
   function applyOperatorFocus(operator, candidateOnly = false) {
+    const normalizedOperator = String(operator || "").trim();
+    if (!normalizedOperator) {
+      return;
+    }
     setSelectedAsset(null);
     setDetail(null);
-    setPendingFocus({ operator, maxZoom: 10 });
+    setPendingFocus({ operator: normalizedOperator, maxZoom: 10 });
+    setOperatorSearch(normalizedOperator);
+    setSelectedOperator(normalizedOperator);
     setFilters((current) => ({
       ...current,
-      operator,
+      operator: normalizedOperator,
       candidateOnly,
+    }));
+  }
+
+  function viewOperatorFromSearch() {
+    const query = operatorSearch.trim();
+    if (!query) {
+      return;
+    }
+    const matchedOperator =
+      operatorOptions.find((option) => option.toLowerCase() === query.toLowerCase()) || query;
+    applyOperatorFocus(matchedOperator, filters.candidateOnly);
+  }
+
+  function clearOperatorFilter() {
+    setOperatorSearch("");
+    setSelectedOperator("");
+    setSelectedAsset(null);
+    setDetail(null);
+    setError("");
+    setFilters((current) => ({
+      ...current,
+      operator: "",
     }));
   }
 
@@ -824,6 +945,8 @@ function App() {
             <strong>{formatNumber(summary?.seller_candidates)}</strong>
           </div>
         </section>
+        {loadingSummary ? <div className="chip muted">Loading summary</div> : null}
+        {summaryError ? <div className="chip muted">{summaryError}</div> : null}
 
         <section className="panel">
           <div className="panel-header">
@@ -833,18 +956,32 @@ function App() {
 
           <label className="field">
             <span>Operator</span>
-            <select
-              value={filters.operator}
-              onChange={(event) => setFilters((current) => ({ ...current, operator: event.target.value }))}
-            >
-              <option value="">All operators</option>
-              {options.operators.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
+            <input
+              list="operator-options"
+              value={operatorSearch}
+              placeholder="Search operator"
+              onChange={(event) => setOperatorSearch(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  viewOperatorFromSearch();
+                }
+              }}
+            />
+            <datalist id="operator-options">
+              {operatorOptions.map((option) => (
+                <option key={option} value={option} />
               ))}
-            </select>
+            </datalist>
           </label>
+          <div className="toggle-group">
+            <button type="button" className="toggle active" onClick={viewOperatorFromSearch}>
+              View Operator
+            </button>
+            <button type="button" className="toggle" onClick={clearOperatorFilter}>
+              Clear
+            </button>
+          </div>
 
           <label className="field">
             <span>Status</span>
@@ -920,8 +1057,9 @@ function App() {
         <section className="panel scroll-panel">
           <div className="panel-header">
             <h2>Seller Candidates</h2>
-            <span className="chip">{filteredSellerRows.length}</span>
+            <span className="chip">{loadingCandidates ? "..." : filteredSellerRows.length}</span>
           </div>
+          {candidateError ? <div className="chip muted">{candidateError}</div> : null}
           {filteredSellerRows.slice(0, 12).map((row) => (
             <button
               type="button"
@@ -939,7 +1077,7 @@ function App() {
         <section className="panel scroll-panel">
           <div className="panel-header">
             <h2>Package Candidates</h2>
-            <span className="chip">{filteredPackageRows.length}</span>
+            <span className="chip">{loadingCandidates ? "..." : filteredPackageRows.length}</span>
           </div>
           {filteredPackageRows.slice(0, 12).map((row) => (
             <button
@@ -964,15 +1102,10 @@ function App() {
       <aside className="right-rail">
         <div className="panel detail-panel">
           <div className="panel-header">
-            <h2>Asset Detail</h2>
-            {loadingDetail ? <span className="chip">Loading</span> : null}
+            <h2>{detail ? "Asset Detail" : selectedOperator ? "Operator Detail" : "Detail"}</h2>
+            {loadingDetail || loadingOperatorDetail ? <span className="chip">Loading</span> : null}
           </div>
-          {!detail ? (
-            <div className="empty-state">
-              Click a facility, pipeline, or mapped well to inspect the registry record and linked
-              assets.
-            </div>
-          ) : (
+          {detail ? (
             <div className="detail-content">
               <div className="detail-title">{detail.asset_name || detail.asset_id}</div>
               <div className="detail-subtitle">{detail.asset_type}</div>
@@ -1104,6 +1237,175 @@ function App() {
                   ))}
                 </section>
               ) : null}
+            </div>
+          ) : operatorDetail ? (
+            <div className="detail-content">
+              <div className="detail-title">{operatorDetail.operator}</div>
+              <div className="detail-subtitle">operator</div>
+              <div className="detail-grid">
+                <div>
+                  <span>Wells</span>
+                  <strong>{formatNumber(operatorDetail.asset_counts?.wells)}</strong>
+                </div>
+                <div>
+                  <span>Facilities</span>
+                  <strong>{formatNumber(operatorDetail.asset_counts?.facilities)}</strong>
+                </div>
+                <div>
+                  <span>Pipelines</span>
+                  <strong>{formatNumber(operatorDetail.asset_counts?.pipelines)}</strong>
+                </div>
+                <div>
+                  <span>Package Candidates</span>
+                  <strong>{formatNumber(operatorDetail.package_candidates?.length)}</strong>
+                </div>
+              </div>
+
+              <section className="detail-section">
+                <h3>Context</h3>
+                <div className="detail-grid">
+                  <div>
+                    <span>Seller Candidate</span>
+                    <strong>{operatorDetail.candidate_flags?.seller_candidate ? "Yes" : "No"}</strong>
+                  </div>
+                  <div>
+                    <span>Package Candidate</span>
+                    <strong>{operatorDetail.candidate_flags?.package_candidate ? "Yes" : "No"}</strong>
+                  </div>
+                  <div>
+                    <span>Top Area</span>
+                    <strong>{formatNumber(operatorDetail.seller_thesis?.core_area_key)}</strong>
+                  </div>
+                  <div>
+                    <span>Top Thesis</span>
+                    <strong>{formatNumber(operatorDetail.seller_thesis?.thesis_score)}</strong>
+                  </div>
+                </div>
+              </section>
+
+              {operatorDetail.operator_metrics ? (
+                <section className="detail-section">
+                  <h3>Operator Metrics</h3>
+                  <div className="detail-grid">
+                    <div>
+                      <span>As Of</span>
+                      <strong>{formatNumber(operatorDetail.operator_metrics.as_of_date)}</strong>
+                    </div>
+                    <div>
+                      <span>30d Oil BPD</span>
+                      <strong>{formatNumber(operatorDetail.operator_metrics.avg_oil_bpd_30d)}</strong>
+                    </div>
+                    <div>
+                      <span>Restart Upside</span>
+                      <strong>{formatNumber(operatorDetail.operator_metrics.restart_upside_bpd_est)}</strong>
+                    </div>
+                    <div>
+                      <span>Suspended Wells</span>
+                      <strong>{formatNumber(operatorDetail.operator_metrics.suspended_wells_count)}</strong>
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+
+              {operatorDetail.seller_thesis ? (
+                <section className="detail-section">
+                  <h3>Seller Thesis</h3>
+                  <div className="detail-grid">
+                    <div>
+                      <span>Priority</span>
+                      <strong>{formatNumber(operatorDetail.seller_thesis.thesis_priority)}</strong>
+                    </div>
+                    <div>
+                      <span>Seller Score</span>
+                      <strong>{formatNumber(operatorDetail.seller_thesis.seller_score)}</strong>
+                    </div>
+                    <div>
+                      <span>Restart Upside</span>
+                      <strong>{formatNumber(operatorDetail.seller_thesis.restart_upside_bpd_est)}</strong>
+                    </div>
+                    <div>
+                      <span>Package Count</span>
+                      <strong>{formatNumber(operatorDetail.seller_thesis.package_count)}</strong>
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+
+              {operatorDetail.package_candidates?.length ? (
+                <section className="detail-section">
+                  <h3>Package Candidates</h3>
+                  {operatorDetail.package_candidates.map((item) => (
+                    <div key={item.area_key} className="detail-list-row">
+                      <strong>{item.area_key}</strong>
+                      <span>
+                        Package {formatNumber(item.package_score)} · Restart {formatNumber(item.estimated_restart_upside_bpd)}
+                      </span>
+                    </div>
+                  ))}
+                </section>
+              ) : null}
+
+              {operatorDetail.top_facilities?.length ? (
+                <section className="detail-section">
+                  <h3>Facilities</h3>
+                  {operatorDetail.top_facilities.map((item) => (
+                    <div key={item.facility_id} className="detail-list-row">
+                      <button
+                        type="button"
+                        className="detail-link"
+                        onClick={() => selectAsset("facility", item.facility_id, { focus: true })}
+                      >
+                        {item.facility_name || item.facility_id}
+                      </button>
+                      <span>{item.facility_status || "n/a"}</span>
+                    </div>
+                  ))}
+                </section>
+              ) : null}
+
+              {operatorDetail.top_wells?.length ? (
+                <section className="detail-section">
+                  <h3>Wells</h3>
+                  {operatorDetail.top_wells.map((item) => (
+                    <div key={item.well_id} className="detail-list-row">
+                      <button
+                        type="button"
+                        className="detail-link"
+                        onClick={() => selectAsset("well", item.well_id, { focus: true })}
+                      >
+                        {item.well_name || item.well_id}
+                      </button>
+                      <span>
+                        {item.status || "n/a"}
+                        {item.restart_score ? ` · Restart ${formatNumber(item.restart_score)}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                </section>
+              ) : null}
+
+              {operatorDetail.top_pipelines?.length ? (
+                <section className="detail-section">
+                  <h3>Pipelines</h3>
+                  {operatorDetail.top_pipelines.map((item) => (
+                    <div key={item.pipeline_id} className="detail-list-row">
+                      <button
+                        type="button"
+                        className="detail-link"
+                        onClick={() => selectAsset("pipeline", item.pipeline_id, { focus: true })}
+                      >
+                        {item.licence_line_number || item.pipeline_id}
+                      </button>
+                      <span>{item.segment_status || "n/a"}</span>
+                    </div>
+                  ))}
+                </section>
+              ) : null}
+            </div>
+          ) : (
+            <div className="empty-state">
+              Search for an operator to load its footprint and metrics, or click a facility,
+              pipeline, or mapped well to inspect an asset.
             </div>
           )}
         </div>
