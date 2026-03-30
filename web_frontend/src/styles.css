@@ -49,12 +49,16 @@ input {
 
 .map-stage {
   position: relative;
+  height: 100vh;
+  height: 100dvh;
   min-height: 100vh;
 }
 
-.map-surface {
+.map-stage > .map-surface {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .brand-block h1 {
@@ -345,6 +349,8 @@ input {
   }
 
   .map-stage {
+    height: 60vh;
+    height: 60dvh;
     min-height: 60vh;
   }
 }
