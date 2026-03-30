@@ -274,6 +274,8 @@ function App() {
   const [pendingFocus, setPendingFocus] = useState(null);
   const [candidateQuery, setCandidateQuery] = useState("");
   const [operatorSearch, setOperatorSearch] = useState(initialUrlState.filters.operator);
+  const [operatorMenuOpen, setOperatorMenuOpen] = useState(false);
+  const [highlightedOperatorIndex, setHighlightedOperatorIndex] = useState(0);
   const [wellLoadingState, setWellLoadingState] = useState("full");
   const [summaryError, setSummaryError] = useState("");
   const [candidateError, setCandidateError] = useState("");
@@ -314,6 +316,14 @@ function App() {
           .includes(query) || String(row.area_key || "").toLowerCase().includes(query),
     );
   }, [packageRows, candidateQuery]);
+
+  const visibleOperatorOptions = useMemo(() => {
+    const query = operatorSearch.trim().toLowerCase();
+    const narrowedOptions = query
+      ? operatorOptions.filter((option) => option.toLowerCase().includes(query))
+      : operatorOptions;
+    return narrowedOptions.slice(0, 8);
+  }, [operatorOptions, operatorSearch]);
 
   const approximateWellCount = useMemo(
     () =>
@@ -400,6 +410,10 @@ function App() {
       window.clearTimeout(timer);
     };
   }, [operatorSearch]);
+
+  useEffect(() => {
+    setHighlightedOperatorIndex(0);
+  }, [operatorSearch, operatorOptions]);
 
   useEffect(() => {
     writeUrlState({ filters, selectedAsset, map: mapRef.current });
@@ -1131,6 +1145,7 @@ function App() {
     if (!normalizedOperator) {
       return;
     }
+    setOperatorMenuOpen(false);
     setSelectedAsset(null);
     setDetail(null);
     setPendingFocus({ operator: normalizedOperator, maxZoom: 10 });
@@ -1149,11 +1164,14 @@ function App() {
       return;
     }
     const matchedOperator =
-      operatorOptions.find((option) => option.toLowerCase() === query.toLowerCase()) || query;
+      visibleOperatorOptions.find((option) => option.toLowerCase() === query.toLowerCase()) ||
+      visibleOperatorOptions[highlightedOperatorIndex] ||
+      query;
     applyOperatorFocus(matchedOperator, filters.candidateOnly);
   }
 
   function clearOperatorFilter() {
+    setOperatorMenuOpen(false);
     setOperatorSearch("");
     setSelectedOperator("");
     setSelectedAsset(null);
@@ -1224,23 +1242,63 @@ function App() {
 
           <label className="field">
             <span>Operator</span>
-            <input
-              list="operator-options"
-              value={operatorSearch}
-              placeholder="Search operator"
-              onChange={(event) => setOperatorSearch(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  viewOperatorFromSearch();
-                }
-              }}
-            />
-            <datalist id="operator-options">
-              {operatorOptions.map((option) => (
-                <option key={option} value={option} />
-              ))}
-            </datalist>
+            <div className="autocomplete">
+              <input
+                value={operatorSearch}
+                placeholder="Search operator"
+                autoComplete="off"
+                onFocus={() => setOperatorMenuOpen(true)}
+                onBlur={() => window.setTimeout(() => setOperatorMenuOpen(false), 120)}
+                onChange={(event) => {
+                  setOperatorSearch(event.target.value);
+                  setOperatorMenuOpen(true);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setOperatorMenuOpen(true);
+                    setHighlightedOperatorIndex((current) =>
+                      Math.min(current + 1, Math.max(visibleOperatorOptions.length - 1, 0)),
+                    );
+                    return;
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setHighlightedOperatorIndex((current) => Math.max(current - 1, 0));
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    setOperatorMenuOpen(false);
+                    return;
+                  }
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    viewOperatorFromSearch();
+                  }
+                }}
+              />
+              {operatorMenuOpen && operatorSearch.trim() ? (
+                <div className="autocomplete-menu">
+                  {visibleOperatorOptions.length ? (
+                    visibleOperatorOptions.map((option, index) => (
+                      <button
+                        key={option}
+                        type="button"
+                        className={index === highlightedOperatorIndex ? "autocomplete-option active" : "autocomplete-option"}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          applyOperatorFocus(option, filters.candidateOnly);
+                        }}
+                      >
+                        {option}
+                      </button>
+                    ))
+                  ) : (
+                    <div className="autocomplete-empty">No matching operators</div>
+                  )}
+                </div>
+              ) : null}
+            </div>
           </label>
           <div className="toggle-group">
             <button type="button" className="toggle active" onClick={viewOperatorFromSearch}>

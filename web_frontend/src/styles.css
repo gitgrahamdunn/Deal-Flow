@@ -176,6 +176,51 @@ input {
   background: rgba(255, 255, 255, 0.82);
 }
 
+.autocomplete {
+  position: relative;
+}
+
+.autocomplete-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  right: 0;
+  z-index: 8;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.35rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(23, 48, 64, 0.12);
+  background: rgba(255, 252, 247, 0.98);
+  box-shadow: 0 16px 34px rgba(24, 49, 63, 0.12);
+}
+
+.autocomplete-option,
+.autocomplete-empty {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.7rem;
+  font: inherit;
+  text-align: left;
+}
+
+.autocomplete-option {
+  border: 0;
+  background: transparent;
+  color: #173040;
+  cursor: pointer;
+}
+
+.autocomplete-option.active,
+.autocomplete-option:hover {
+  background: rgba(226, 239, 237, 0.95);
+}
+
+.autocomplete-empty {
+  color: #647b89;
+  font-size: 0.82rem;
+}
+
 .toggle-group {
   display: flex;
   flex-wrap: wrap;
