@@ -12,3 +12,4 @@ deal_flow_ingest/**/__pycache__/
 deal_flow_ingest/**/*.egg-info/
 web_frontend/node_modules/
 web_frontend/dist/
+test-results/

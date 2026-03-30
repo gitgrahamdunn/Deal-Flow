@@ -102,6 +102,7 @@ dealflow funnel --bg --yes
 ```
 
 Then open the Funnel URL reported by `dealflow funnel --status`.
+You can also point Funnel at the new FastAPI backend by changing the local port, for example `dealflow funnel --port 8000 --https-port 443 --bg --yes`.
 
 ## Web app
 
@@ -155,6 +156,33 @@ cp .env.web.example .env.web
 docker compose -f docker-compose.postgres.yml up -d
 docker compose -f docker-compose.web.yml up -d --build
 ```
+
+Render-hosted frontend with a local backend over Tailscale Funnel:
+
+1. Start the API locally and restrict browser access to your Render domain:
+```bash
+export DATABASE_URL=postgresql+psycopg://dealflow:dealflow@localhost:5432/dealflow
+export DEALFLOW_WEB_ALLOWED_ORIGINS=https://dealflow-frontend.onrender.com
+dealflow web --host 127.0.0.1 --port 8000
+```
+2. Expose that local API through Funnel:
+```bash
+dealflow funnel --port 8000 --https-port 443 --bg --yes
+dealflow funnel --status
+```
+3. In Render, create a Blueprint from `render.yaml` or create a static site manually with:
+```bash
+Root Directory: web_frontend
+Build Command: npm ci && npm run build
+Publish Directory: dist
+```
+4. Set `VITE_API_BASE_URL` in Render to the HTTPS Funnel URL reported by `dealflow funnel --status`.
+
+Notes:
+
+- `DEALFLOW_WEB_ALLOWED_ORIGINS` accepts a comma-separated allowlist of exact frontend origins.
+- `DEALFLOW_WEB_ALLOWED_ORIGIN_REGEX` is available if you need to match Render preview URLs.
+- Tailscale Funnel makes the API publicly reachable on the internet. CORS only limits browser origins; it does not authenticate or hide the API.
 
 ## Recommended live workflow
 

@@ -97,7 +97,7 @@ def parse_args() -> argparse.Namespace:
     gui = sub.add_parser("gui", help="Alias for app")
     gui.add_argument("--port", type=int, default=8443)
     gui.add_argument("--host", type=str, default="127.0.0.1")
-    funnel = sub.add_parser("funnel", help="Expose the GUI through Tailscale Funnel")
+    funnel = sub.add_parser("funnel", help="Expose a local Deal Flow HTTP service through Tailscale Funnel")
     funnel.add_argument("--port", type=int, default=8443)
     funnel.add_argument("--https-port", type=int, default=8443)
     funnel.add_argument("--bg", action="store_true")
@@ -495,7 +495,7 @@ def run_funnel(args: argparse.Namespace) -> int:
         cmd.append("--yes")
     cmd.append(f"http://127.0.0.1:{args.port}")
     print(
-        f"Exposing Deal Flow GUI through Tailscale Funnel at external port {args.https_port} "
+        f"Exposing a local Deal Flow HTTP service through Tailscale Funnel at external port {args.https_port} "
         f"to local port {args.port}"
     )
     return subprocess.call(cmd)
