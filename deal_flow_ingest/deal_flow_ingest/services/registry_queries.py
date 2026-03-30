@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
+import re
 
 import pandas as pd
 from sqlalchemy import text
@@ -13,9 +15,21 @@ from deal_flow_ingest.db.schema import get_engine
 ALLOWED_ASSET_TYPES = {"wells", "facilities", "pipelines"}
 DEFAULT_LIMIT_PER_LAYER = 50000
 MAX_LIMIT_PER_LAYER = 100000
+DEFAULT_OVERLAY_LIMIT = 2500
+MAX_OVERLAY_LIMIT = 8000
 APPROX_LAT_DEGREES_PER_MILE = 1.0 / 69.172
 APPROX_LON_DEGREES_PER_MILE = 1.0 / 44.5
 LOW_ZOOM_WELL_AGGREGATION_THRESHOLD = 6.8
+AREA_KEY_PATTERN = re.compile(r"^(?:(\d{2})-)?(\d{2})-(\d{3})-(\d{2})W(\d)$")
+MERIDIAN_BASE_LONGITUDES = {
+    1: -97.4578917,
+    2: -102.0,
+    3: -106.0,
+    4: -110.0,
+    5: -114.0,
+    6: -118.0,
+    7: -122.0,
+}
 
 
 @dataclass(slots=True)
@@ -65,6 +79,10 @@ def _normalize_filters(filters: RegistryMapFilters) -> RegistryMapFilters:
         max_lon=filters.max_lon,
         limit_per_layer=limit_per_layer,
     )
+
+
+def _empty_feature_collection() -> dict[str, object]:
+    return {"type": "FeatureCollection", "features": []}
 
 
 def _read_frame(sql: str, params: dict[str, object] | None = None) -> pd.DataFrame:
@@ -503,20 +521,379 @@ def get_combined_registry_map_frame(filters: RegistryMapFilters | None = None) -
     return pd.concat(frames, ignore_index=True, sort=False)
 
 
-def get_registry_filter_options() -> dict[str, list[str]]:
-    operators = _read_frame(
-        """
-        SELECT operator
-        FROM (
-            SELECT DISTINCT operator FROM asset_registry_wells WHERE operator IS NOT NULL AND TRIM(operator) <> ''
-            UNION
-            SELECT DISTINCT operator FROM asset_registry_facilities WHERE operator IS NOT NULL AND TRIM(operator) <> ''
-            UNION
-            SELECT DISTINCT operator FROM asset_registry_pipelines WHERE operator IS NOT NULL AND TRIM(operator) <> ''
-        )
-        ORDER BY operator
-        """
+def _normalize_overlay_limit(limit: int) -> int:
+    normalized_limit = int(limit)
+    if normalized_limit <= 0:
+        raise ValueError("limit must be positive")
+    return min(normalized_limit, MAX_OVERLAY_LIMIT)
+
+
+def _parse_area_key(area_key: str | None) -> dict[str, int] | None:
+    normalized = str(area_key or "").strip().upper()
+    if not normalized:
+        return None
+    matched = AREA_KEY_PATTERN.match(normalized)
+    if not matched:
+        return None
+    lsd_raw, section_raw, township_raw, range_raw, meridian_raw = matched.groups()
+    return {
+        "lsd": int(lsd_raw) if lsd_raw else 0,
+        "section": int(section_raw),
+        "township": int(township_raw),
+        "range": int(range_raw),
+        "meridian": int(meridian_raw),
+    }
+
+
+def _get_section_offsets(section: int) -> tuple[int, int] | None:
+    if section < 1 or section > 36:
+        return None
+    row = (section - 1) // 6
+    position = section - (row * 6)
+    col = position - 1 if row % 2 == 0 else 6 - position
+    return row, col
+
+
+def _get_lsd_offsets(lsd: int) -> tuple[int, int] | None:
+    if lsd < 1 or lsd > 16:
+        return None
+    row = (lsd - 1) // 4
+    position = lsd - (row * 4)
+    col = position - 1 if row % 2 == 0 else 4 - position
+    return row, col
+
+
+def _get_area_bounds(area_key: str | None) -> dict[str, float] | None:
+    parsed = _parse_area_key(area_key)
+    if parsed is None:
+        return None
+    section_offsets = _get_section_offsets(parsed["section"])
+    if section_offsets is None:
+        return None
+    meridian_lon = MERIDIAN_BASE_LONGITUDES.get(parsed["meridian"])
+    if meridian_lon is None:
+        return None
+
+    section_row, section_col = section_offsets
+    lat_offset_miles = ((parsed["township"] - 1) * 6.0) + section_row
+    lon_offset_miles = ((parsed["range"] - 1) * 6.0) + section_col
+    cell_size_miles = 1.0
+
+    if parsed["lsd"]:
+        lsd_offsets = _get_lsd_offsets(parsed["lsd"])
+        if lsd_offsets is None:
+            return None
+        lsd_row, lsd_col = lsd_offsets
+        lat_offset_miles += lsd_row * 0.25
+        lon_offset_miles += lsd_col * 0.25
+        cell_size_miles = 0.25
+
+    south = 49.0 + (lat_offset_miles * APPROX_LAT_DEGREES_PER_MILE)
+    north = 49.0 + ((lat_offset_miles + cell_size_miles) * APPROX_LAT_DEGREES_PER_MILE)
+    east = meridian_lon - (lon_offset_miles * APPROX_LON_DEGREES_PER_MILE)
+    west = meridian_lon - ((lon_offset_miles + cell_size_miles) * APPROX_LON_DEGREES_PER_MILE)
+
+    return {
+        "south": south,
+        "north": north,
+        "west": west,
+        "east": east,
+    }
+
+
+def _bounds_to_polygon(bounds: dict[str, float]) -> list[list[float]]:
+    return [
+        [bounds["west"], bounds["south"]],
+        [bounds["east"], bounds["south"]],
+        [bounds["east"], bounds["north"]],
+        [bounds["west"], bounds["north"]],
+        [bounds["west"], bounds["south"]],
+    ]
+
+
+def _bbox_contains_bounds(
+    bounds: dict[str, float],
+    *,
+    min_lat: float | None,
+    max_lat: float | None,
+    min_lon: float | None,
+    max_lon: float | None,
+) -> bool:
+    if min_lat is not None and bounds["north"] < min_lat:
+        return False
+    if max_lat is not None and bounds["south"] > max_lat:
+        return False
+    if min_lon is not None and bounds["east"] < min_lon:
+        return False
+    if max_lon is not None and bounds["west"] > max_lon:
+        return False
+    return True
+
+
+def _package_overlay_centroid_sql(alias: str) -> tuple[str, str]:
+    lsd_expr = f"CAST(SUBSTR({alias}.area_key, 1, 2) AS INTEGER)"
+    section_expr = f"CAST(SUBSTR({alias}.area_key, 4, 2) AS INTEGER)"
+    lat_expr = f"""
+    CASE
+        WHEN {alias}.area_key IS NULL OR TRIM({alias}.area_key) = '' THEN NULL
+        WHEN {alias}.township IS NULL OR {alias}.range IS NULL OR {alias}.meridian IS NULL THEN NULL
+        ELSE
+            49.0
+            + (
+                (({alias}.township - 1) * 6.0)
+                + CAST((({section_expr} - 1) / 6) AS INTEGER)
+                + CASE
+                    WHEN {lsd_expr} BETWEEN 1 AND 16
+                    THEN (CAST((({lsd_expr} - 1) / 4) AS INTEGER) * 0.25) + 0.125
+                    ELSE 0.5
+                  END
+            ) * {APPROX_LAT_DEGREES_PER_MILE}
+    END
+    """
+    lon_expr = f"""
+    CASE
+        WHEN {alias}.area_key IS NULL OR TRIM({alias}.area_key) = '' THEN NULL
+        WHEN {alias}.township IS NULL OR {alias}.range IS NULL OR {alias}.meridian IS NULL THEN NULL
+        ELSE
+            (
+                CASE
+                    WHEN {alias}.meridian = 1 THEN -97.4578917
+                    WHEN {alias}.meridian = 2 THEN -102.0
+                    WHEN {alias}.meridian = 3 THEN -106.0
+                    WHEN {alias}.meridian = 4 THEN -110.0
+                    WHEN {alias}.meridian = 5 THEN -114.0
+                    WHEN {alias}.meridian = 6 THEN -118.0
+                    WHEN {alias}.meridian = 7 THEN -122.0
+                    ELSE NULL
+                END
+            )
+            - (
+                (({alias}.range - 1) * 6.0)
+                + CASE
+                    WHEN MOD(CAST((({section_expr} - 1) / 6) AS INTEGER), 2) = 0
+                    THEN ({section_expr} - (CAST((({section_expr} - 1) / 6) AS INTEGER) * 6) - 1)
+                    ELSE (6 - ({section_expr} - (CAST((({section_expr} - 1) / 6) AS INTEGER) * 6)))
+                  END
+                + CASE
+                    WHEN {lsd_expr} BETWEEN 1 AND 16
+                    THEN (
+                        CASE
+                            WHEN MOD(CAST((({lsd_expr} - 1) / 4) AS INTEGER), 2) = 0
+                            THEN ({lsd_expr} - (CAST((({lsd_expr} - 1) / 4) AS INTEGER) * 4) - 1) * 0.25 + 0.125
+                            ELSE (4 - ({lsd_expr} - (CAST((({lsd_expr} - 1) / 4) AS INTEGER) * 4))) * 0.25 + 0.125
+                        END
+                    )
+                    ELSE 0.5
+                  END
+            ) * {APPROX_LON_DEGREES_PER_MILE}
+    END
+    """
+    return lat_expr, lon_expr
+
+
+def _get_package_overlay_rows(
+    *,
+    operator: str | None,
+    min_lat: float | None,
+    max_lat: float | None,
+    min_lon: float | None,
+    max_lon: float | None,
+    limit: int,
+) -> pd.DataFrame:
+    params: dict[str, object] = {"limit": limit}
+    base_clauses = [
+        "p.area_key IS NOT NULL",
+        "p.township IS NOT NULL",
+        "p.range IS NOT NULL",
+        "p.meridian IS NOT NULL",
+    ]
+    outer_clauses = ["overlay_rows.centroid_lat IS NOT NULL", "overlay_rows.centroid_lon IS NOT NULL"]
+    if operator:
+        base_clauses.append("p.operator = :operator")
+        params["operator"] = operator
+    else:
+        if min_lat is not None:
+            outer_clauses.append("overlay_rows.centroid_lat >= :min_lat")
+            params["min_lat"] = min_lat
+        if max_lat is not None:
+            outer_clauses.append("overlay_rows.centroid_lat <= :max_lat")
+            params["max_lat"] = max_lat
+        if min_lon is not None:
+            outer_clauses.append("overlay_rows.centroid_lon >= :min_lon")
+            params["min_lon"] = min_lon
+        if max_lon is not None:
+            outer_clauses.append("overlay_rows.centroid_lon <= :max_lon")
+            params["max_lon"] = max_lon
+
+    centroid_lat_sql, centroid_lon_sql = _package_overlay_centroid_sql("p")
+    sql = f"""
+    WITH overlay_rows AS (
+        SELECT
+            p.operator_id,
+            p.operator,
+            p.area_key,
+            p.township,
+            p.range,
+            p.meridian,
+            p.package_score,
+            p.suspended_well_count,
+            p.high_priority_well_count,
+            p.estimated_restart_upside_bpd,
+            p.linked_facility_count,
+            p.facility_linked_well_count,
+            o.package_count,
+            o.total_suspended_wells,
+            o.total_high_priority_wells,
+            o.total_estimated_restart_upside_bpd,
+            o.avg_package_score,
+            o.top_package_score,
+            o.core_area_key,
+            o.footprint_type,
+            o.footprint_score,
+            {centroid_lat_sql} AS centroid_lat,
+            {centroid_lon_sql} AS centroid_lon
+        FROM package_candidates p
+        LEFT JOIN operator_area_footprints o
+            ON o.operator_id = p.operator_id
+        WHERE {' AND '.join(base_clauses)}
     )
+    SELECT *
+    FROM overlay_rows
+    WHERE {' AND '.join(outer_clauses)}
+    ORDER BY package_score DESC, operator, area_key
+    LIMIT :limit
+    """
+    return _read_frame(sql, params)
+
+
+def get_registry_map_overlays(
+    *,
+    operator: str | None = None,
+    min_lat: float | None = None,
+    max_lat: float | None = None,
+    min_lon: float | None = None,
+    max_lon: float | None = None,
+    include_package_areas: bool = True,
+    include_operator_footprints: bool = True,
+    limit: int = DEFAULT_OVERLAY_LIMIT,
+) -> dict[str, object]:
+    normalized_operator = operator.strip() if isinstance(operator, str) and operator.strip() else None
+    normalized_limit = _normalize_overlay_limit(limit)
+    if min_lat is not None and max_lat is not None and min_lat > max_lat:
+        raise ValueError("min_lat cannot be greater than max_lat")
+    if min_lon is not None and max_lon is not None and min_lon > max_lon:
+        raise ValueError("min_lon cannot be greater than max_lon")
+    if not include_package_areas and not include_operator_footprints:
+        return {
+            "package_areas": _empty_feature_collection(),
+            "operator_footprints": _empty_feature_collection(),
+            "counts": {"package_areas": 0, "operator_footprints": 0},
+        }
+
+    rows = _get_package_overlay_rows(
+        operator=normalized_operator,
+        min_lat=min_lat,
+        max_lat=max_lat,
+        min_lon=min_lon,
+        max_lon=max_lon,
+        limit=normalized_limit,
+    )
+    if rows.empty:
+        return {
+            "package_areas": _empty_feature_collection(),
+            "operator_footprints": _empty_feature_collection(),
+            "counts": {"package_areas": 0, "operator_footprints": 0},
+        }
+
+    package_features: list[dict[str, object]] = []
+    footprint_features: list[dict[str, object]] = []
+    grouped_polygons: dict[tuple[object, object], list[list[list[float]]]] = defaultdict(list)
+    grouped_properties: dict[tuple[object, object], dict[str, object]] = {}
+
+    for row in rows.where(pd.notna(rows), None).to_dict(orient="records"):
+        bounds = _get_area_bounds(row.get("area_key"))
+        if bounds is None:
+            continue
+        if normalized_operator is None and not _bbox_contains_bounds(
+            bounds,
+            min_lat=min_lat,
+            max_lat=max_lat,
+            min_lon=min_lon,
+            max_lon=max_lon,
+        ):
+            continue
+        polygon = _bounds_to_polygon(bounds)
+        if include_package_areas:
+            package_features.append(
+                {
+                    "type": "Feature",
+                    "id": f"package:{row.get('operator_id') or row.get('operator')}:{row.get('area_key')}",
+                    "geometry": {"type": "Polygon", "coordinates": [polygon]},
+                    "properties": {
+                        "overlay_type": "package_area",
+                        "operator_id": row.get("operator_id"),
+                        "operator": row.get("operator"),
+                        "area_key": row.get("area_key"),
+                        "package_score": row.get("package_score"),
+                        "suspended_well_count": row.get("suspended_well_count"),
+                        "high_priority_well_count": row.get("high_priority_well_count"),
+                        "estimated_restart_upside_bpd": row.get("estimated_restart_upside_bpd"),
+                        "linked_facility_count": row.get("linked_facility_count"),
+                        "facility_linked_well_count": row.get("facility_linked_well_count"),
+                        "footprint_type": row.get("footprint_type"),
+                        "core_area_key": row.get("core_area_key"),
+                        "is_core_area": row.get("area_key") == row.get("core_area_key"),
+                    },
+                }
+            )
+        if include_operator_footprints:
+            group_key = (row.get("operator_id"), row.get("operator"))
+            grouped_polygons[group_key].append([polygon])
+            grouped_properties[group_key] = {
+                "overlay_type": "operator_footprint",
+                "operator_id": row.get("operator_id"),
+                "operator": row.get("operator"),
+                "package_count": row.get("package_count"),
+                "visible_package_cells": len(grouped_polygons[group_key]),
+                "footprint_type": row.get("footprint_type"),
+                "footprint_score": row.get("footprint_score"),
+                "top_package_score": row.get("top_package_score"),
+                "avg_package_score": row.get("avg_package_score"),
+                "core_area_key": row.get("core_area_key"),
+                "total_suspended_wells": row.get("total_suspended_wells"),
+                "total_high_priority_wells": row.get("total_high_priority_wells"),
+                "total_estimated_restart_upside_bpd": row.get("total_estimated_restart_upside_bpd"),
+            }
+
+    if include_operator_footprints:
+        for (operator_id, operator_name), polygons in grouped_polygons.items():
+            properties = grouped_properties[(operator_id, operator_name)] | {"visible_package_cells": len(polygons)}
+            footprint_features.append(
+                {
+                    "type": "Feature",
+                    "id": f"footprint:{operator_id or operator_name}",
+                    "geometry": {"type": "MultiPolygon", "coordinates": polygons},
+                    "properties": properties,
+                }
+            )
+        footprint_features.sort(
+            key=lambda feature: (
+                -(float(feature["properties"].get("footprint_score") or 0.0)),
+                str(feature["properties"].get("operator") or ""),
+            )
+        )
+
+    return {
+        "package_areas": {"type": "FeatureCollection", "features": package_features},
+        "operator_footprints": {"type": "FeatureCollection", "features": footprint_features},
+        "counts": {
+            "package_areas": len(package_features),
+            "operator_footprints": len(footprint_features),
+        },
+    }
+
+
+def get_registry_filter_options() -> dict[str, list[str]]:
     well_statuses = _read_frame(
         "SELECT DISTINCT status FROM asset_registry_wells WHERE status IS NOT NULL AND TRIM(status) <> '' ORDER BY status"
     )
@@ -529,7 +906,6 @@ def get_registry_filter_options() -> dict[str, list[str]]:
         "WHERE segment_status IS NOT NULL AND TRIM(segment_status) <> '' ORDER BY segment_status"
     )
     return {
-        "operators": operators["operator"].dropna().astype(str).tolist() if "operator" in operators.columns else [],
         "well_statuses": well_statuses["status"].dropna().astype(str).tolist() if "status" in well_statuses.columns else [],
         "facility_statuses": facility_statuses["status"].dropna().astype(str).tolist()
         if "status" in facility_statuses.columns
@@ -538,6 +914,46 @@ def get_registry_filter_options() -> dict[str, list[str]]:
         if "status" in pipeline_statuses.columns
         else [],
     }
+
+
+def get_operator_suggestions(query: str = "", limit: int = 25) -> list[str]:
+    normalized_query = query.strip()
+    normalized_limit = max(1, min(int(limit), 100))
+    params: dict[str, object] = {"limit": normalized_limit}
+    where_clause = ""
+    if normalized_query:
+        params["query"] = f"%{normalized_query.lower()}%"
+        where_clause = "WHERE LOWER(operator) LIKE :query"
+
+    frame = _read_frame(
+        f"""
+        SELECT operator
+        FROM (
+            SELECT DISTINCT operator FROM asset_registry_wells WHERE operator IS NOT NULL AND TRIM(operator) <> ''
+            UNION
+            SELECT DISTINCT operator FROM asset_registry_facilities WHERE operator IS NOT NULL AND TRIM(operator) <> ''
+            UNION
+            SELECT DISTINCT operator FROM asset_registry_pipelines WHERE operator IS NOT NULL AND TRIM(operator) <> ''
+        ) operators
+        {where_clause}
+        ORDER BY LENGTH(operator), operator
+        LIMIT :limit
+        """,
+        params,
+    )
+    if "operator" not in frame.columns:
+        return []
+    return frame["operator"].dropna().astype(str).tolist()
+
+
+def _is_package_candidate(operator: str | None) -> bool:
+    if not operator:
+        return False
+    frame = _read_frame(
+        "SELECT 1 AS matched FROM package_candidates WHERE operator = :operator LIMIT 1",
+        {"operator": operator},
+    )
+    return not frame.empty
 
 
 def get_seller_candidates(limit: int = 200, min_score: float = 0.0) -> pd.DataFrame:
@@ -661,6 +1077,119 @@ def _is_seller_candidate(operator: str | None) -> bool:
         {"operator": operator},
     )
     return not frame.empty
+
+
+def get_operator_detail(operator: str) -> dict[str, object] | None:
+    normalized_operator = operator.strip()
+    if not normalized_operator:
+        return None
+
+    counts = _read_frame(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM asset_registry_wells WHERE operator = :operator) AS wells,
+            (SELECT COUNT(*) FROM asset_registry_facilities WHERE operator = :operator) AS facilities,
+            (SELECT COUNT(*) FROM asset_registry_pipelines WHERE operator = :operator) AS pipelines
+        """,
+        {"operator": normalized_operator},
+    )
+    count_payload = counts.iloc[0].where(pd.notna(counts.iloc[0]), 0).to_dict() if not counts.empty else {}
+    asset_counts = {key: int(count_payload.get(key) or 0) for key in ("wells", "facilities", "pipelines")}
+
+    seller = _read_frame(
+        """
+        SELECT
+            operator,
+            as_of_date,
+            thesis_score,
+            thesis_priority,
+            seller_score,
+            restart_upside_bpd_est,
+            package_count,
+            top_package_score,
+            core_area_key
+        FROM seller_theses
+        WHERE operator = :operator
+        ORDER BY thesis_score DESC, seller_score DESC
+        LIMIT 1
+        """,
+        {"operator": normalized_operator},
+    )
+    package_candidates = _read_frame(
+        """
+        SELECT
+            area_key,
+            package_score,
+            estimated_restart_upside_bpd,
+            suspended_well_count,
+            high_priority_well_count
+        FROM package_candidates
+        WHERE operator = :operator
+        ORDER BY package_score DESC, estimated_restart_upside_bpd DESC, area_key
+        LIMIT 8
+        """,
+        {"operator": normalized_operator},
+    )
+    top_wells = _read_frame(
+        """
+        SELECT
+            well_id,
+            well_name,
+            status,
+            restart_score
+        FROM asset_registry_wells
+        WHERE operator = :operator
+        ORDER BY COALESCE(restart_score, 0) DESC, well_id
+        LIMIT 12
+        """,
+        {"operator": normalized_operator},
+    )
+    top_facilities = _read_frame(
+        """
+        SELECT
+            facility_id,
+            facility_name,
+            facility_status
+        FROM asset_registry_facilities
+        WHERE operator = :operator
+        ORDER BY facility_id
+        LIMIT 12
+        """,
+        {"operator": normalized_operator},
+    )
+    top_pipelines = _read_frame(
+        """
+        SELECT
+            pipeline_id,
+            licence_line_number,
+            segment_status
+        FROM asset_registry_pipelines
+        WHERE operator = :operator
+        ORDER BY pipeline_id
+        LIMIT 12
+        """,
+        {"operator": normalized_operator},
+    )
+
+    operator_metrics = _get_operator_metrics(normalized_operator)
+    has_results = any(asset_counts.values()) or operator_metrics or not seller.empty or not package_candidates.empty
+    if not has_results:
+        return None
+
+    return {
+        "operator": normalized_operator,
+        "asset_counts": asset_counts,
+        "operator_metrics": operator_metrics,
+        "candidate_flags": {
+            "seller_candidate": _is_seller_candidate(normalized_operator),
+            "package_candidate": _is_package_candidate(normalized_operator),
+        },
+        "seller_thesis": seller.iloc[0].where(pd.notna(seller.iloc[0]), None).to_dict() if not seller.empty else None,
+        "package_candidates": package_candidates.where(pd.notna(package_candidates), None).to_dict(orient="records"),
+        "top_wells": top_wells.where(pd.notna(top_wells), None).to_dict(orient="records"),
+        "top_facilities": top_facilities.where(pd.notna(top_facilities), None).to_dict(orient="records"),
+        "top_pipelines": top_pipelines.where(pd.notna(top_pipelines), None).to_dict(orient="records"),
+    }
 
 
 def get_asset_detail(asset_type: str, asset_id: str) -> dict[str, object] | None:

@@ -3,6 +3,7 @@ import {
   getAssetDetail,
   getFilterOptions,
   getMapAssets,
+  getMapOverlays,
   getOperatorDetail,
   getOperatorSuggestions,
   getPackageCandidates,
@@ -12,6 +13,9 @@ import {
 
 const DEFAULT_CENTER = [-114.5, 54.7];
 const DEFAULT_ZOOM = 5.1;
+const PACKAGE_LAYER_MIN_ZOOM = 6.2;
+const PACKAGE_LAYER_IDS = ["package-areas-fill", "package-areas-outline"];
+const FOOTPRINT_LAYER_IDS = ["operator-footprints-fill", "operator-footprints-outline"];
 
 const rasterStyle = {
   version: 8,
@@ -42,6 +46,10 @@ function boundsToQuery(bounds) {
     min_lat: bounds.getSouth(),
     max_lat: bounds.getNorth(),
   };
+}
+
+function emptyFeatureCollection() {
+  return { type: "FeatureCollection", features: [] };
 }
 
 function toPointFeatures(rows) {
@@ -134,6 +142,28 @@ function getLayerLimit(map, filters) {
   return 4000;
 }
 
+function getOverlayLimit(map, operator) {
+  if (operator) {
+    return 5000;
+  }
+  const zoom = map?.getZoom() || DEFAULT_ZOOM;
+  if (zoom >= 9) {
+    return 3000;
+  }
+  if (zoom >= 7) {
+    return 2200;
+  }
+  return 1400;
+}
+
+function setLayerVisibility(map, layerIds, visible) {
+  layerIds.forEach((layerId) => {
+    if (map.getLayer(layerId)) {
+      map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
+    }
+  });
+}
+
 function readUrlState() {
   const params = new URLSearchParams(window.location.search);
   const layers = new Set((params.get("layers") || "wells,facilities,pipelines").split(",").filter(Boolean));
@@ -210,6 +240,7 @@ function App() {
   const mapRef = useRef(null);
   const popupRef = useRef(null);
   const mapRequestRef = useRef({ id: 0, controller: null, timer: null });
+  const overlayRequestRef = useRef({ id: 0, controller: null, timer: null });
   const maplibreRef = useRef(null);
   const wellknownRef = useRef(null);
   const initialSelectionRef = useRef(initialUrlState.selectedAsset);
@@ -237,6 +268,7 @@ function App() {
   const [loadingOperatorDetail, setLoadingOperatorDetail] = useState(false);
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
+  const [loadingOverlays, setLoadingOverlays] = useState(false);
   const [mapReady, setMapReady] = useState(false);
   const [viewportToken, setViewportToken] = useState(0);
   const [pendingFocus, setPendingFocus] = useState(null);
@@ -246,6 +278,8 @@ function App() {
   const [summaryError, setSummaryError] = useState("");
   const [candidateError, setCandidateError] = useState("");
   const [filters, setFilters] = useState(initialUrlState.filters);
+  const [overlayVisibility, setOverlayVisibility] = useState({ packageAreas: true, operatorFootprints: true });
+  const [overlayCounts, setOverlayCounts] = useState({ packageAreas: 0, operatorFootprints: 0 });
 
   const activeAssetTypes = useMemo(
     () =>
@@ -445,8 +479,112 @@ function App() {
         clusterMaxZoom: 10,
       });
       map.addSource("pipelines", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addSource("operator-footprints", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("package-areas", { type: "geojson", data: emptyFeatureCollection() });
       map.addSource("selection-point", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addSource("selection-line", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+
+      map.addLayer({
+        id: "operator-footprints-fill",
+        type: "fill",
+        source: "operator-footprints",
+        paint: {
+          "fill-color": [
+            "match",
+            ["get", "footprint_type"],
+            "single_area",
+            "#4b8b7f",
+            "core_area",
+            "#2f6f8f",
+            "scattered",
+            "#7b6956",
+            "#5b7788",
+          ],
+          "fill-opacity": 0.12,
+        },
+      });
+
+      map.addLayer({
+        id: "operator-footprints-outline",
+        type: "line",
+        source: "operator-footprints",
+        paint: {
+          "line-color": [
+            "match",
+            ["get", "footprint_type"],
+            "single_area",
+            "#32685d",
+            "core_area",
+            "#214d63",
+            "scattered",
+            "#705743",
+            "#466273",
+          ],
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            5,
+            0.9,
+            10,
+            2.2,
+          ],
+          "line-opacity": 0.72,
+        },
+      });
+
+      map.addLayer({
+        id: "package-areas-fill",
+        type: "fill",
+        source: "package-areas",
+        minzoom: PACKAGE_LAYER_MIN_ZOOM,
+        paint: {
+          "fill-color": [
+            "case",
+            ["==", ["get", "is_core_area"], true],
+            "#cf5c2c",
+            [
+              "interpolate",
+              ["linear"],
+              ["coalesce", ["to-number", ["get", "package_score"]], 0],
+              35,
+              "#f4db9a",
+              55,
+              "#ebb168",
+              75,
+              "#d87937",
+              90,
+              "#a94b20",
+            ],
+          ],
+          "fill-opacity": 0.22,
+        },
+      });
+
+      map.addLayer({
+        id: "package-areas-outline",
+        type: "line",
+        source: "package-areas",
+        minzoom: PACKAGE_LAYER_MIN_ZOOM,
+        paint: {
+          "line-color": [
+            "case",
+            ["==", ["get", "is_core_area"], true],
+            "#8a3516",
+            "#9f6b2d",
+          ],
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            PACKAGE_LAYER_MIN_ZOOM,
+            0.7,
+            10,
+            1.6,
+          ],
+          "line-opacity": 0.9,
+        },
+      });
 
       map.addLayer({
         id: "pipelines",
@@ -638,7 +776,17 @@ function App() {
 
       const handlePointer = (event) => {
         const features = map.queryRenderedFeatures(event.point, {
-          layers: ["facilities", "wells", "pipelines", "facilities-clusters", "wells-clusters"],
+          layers: [
+            "facilities",
+            "wells",
+            "pipelines",
+            "facilities-clusters",
+            "wells-clusters",
+            "package-areas-fill",
+            "package-areas-outline",
+            "operator-footprints-fill",
+            "operator-footprints-outline",
+          ],
         });
         map.getCanvas().style.cursor = features.length ? "pointer" : "";
       };
@@ -646,7 +794,17 @@ function App() {
 
       const handleClick = (event) => {
         const features = map.queryRenderedFeatures(event.point, {
-          layers: ["facilities", "wells", "pipelines", "facilities-clusters", "wells-clusters"],
+          layers: [
+            "facilities",
+            "wells",
+            "pipelines",
+            "facilities-clusters",
+            "wells-clusters",
+            "package-areas-fill",
+            "package-areas-outline",
+            "operator-footprints-fill",
+            "operator-footprints-outline",
+          ],
         });
         if (!features.length) {
           return;
@@ -674,6 +832,32 @@ function App() {
             zoom: Math.max((map.getZoom() || DEFAULT_ZOOM) + 1.4, 7.2),
             duration: 500,
           });
+          return;
+        }
+        if (layerId?.startsWith("package-areas")) {
+          if (popupRef.current) {
+            popupRef.current.remove();
+          }
+          popupRef.current = new maplibreLib.Popup({ closeButton: false, offset: 12 })
+            .setLngLat(event.lngLat)
+            .setHTML(
+              `<div class="map-popup"><strong>${props.operator || "Unknown operator"}</strong><br/>Package area ${props.area_key || "n/a"}<br/>Score ${props.package_score || "n/a"}</div>`,
+            )
+            .addTo(map);
+          applyOperatorFocus(props.operator || "", true);
+          return;
+        }
+        if (layerId?.startsWith("operator-footprints")) {
+          if (popupRef.current) {
+            popupRef.current.remove();
+          }
+          popupRef.current = new maplibreLib.Popup({ closeButton: false, offset: 12 })
+            .setLngLat(event.lngLat)
+            .setHTML(
+              `<div class="map-popup"><strong>${props.operator || "Unknown operator"}</strong><br/>${props.footprint_type || "footprint"} footprint<br/>${props.visible_package_cells || 0} visible package cells</div>`,
+            )
+            .addTo(map);
+          applyOperatorFocus(props.operator || "", false);
           return;
         }
         if (popupRef.current) {
@@ -707,6 +891,10 @@ function App() {
         window.clearTimeout(mapRequestRef.current.timer);
       }
       mapRequestRef.current.controller?.abort();
+      if (overlayRequestRef.current.timer) {
+        window.clearTimeout(overlayRequestRef.current.timer);
+      }
+      overlayRequestRef.current.controller?.abort();
       createdMap?.remove();
       mapRef.current = null;
     };
@@ -781,6 +969,82 @@ function App() {
         });
     }, 180);
   }, [filters, mapReady, activeAssetTypes, viewportToken]);
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) {
+      return;
+    }
+    const map = mapRef.current;
+    const zoom = map.getZoom() || DEFAULT_ZOOM;
+    const packageLayersVisible = overlayVisibility.packageAreas && (Boolean(filters.operator) || zoom >= PACKAGE_LAYER_MIN_ZOOM);
+    setLayerVisibility(map, PACKAGE_LAYER_IDS, packageLayersVisible);
+    setLayerVisibility(map, FOOTPRINT_LAYER_IDS, overlayVisibility.operatorFootprints);
+  }, [filters.operator, mapReady, overlayVisibility, viewportToken]);
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) {
+      return;
+    }
+    const map = mapRef.current;
+    const bounds = map.getBounds();
+    const zoom = map.getZoom() || DEFAULT_ZOOM;
+    const includePackageAreas = overlayVisibility.packageAreas && (Boolean(filters.operator) || zoom >= PACKAGE_LAYER_MIN_ZOOM);
+    const includeOperatorFootprints = overlayVisibility.operatorFootprints;
+
+    if (!includePackageAreas && !includeOperatorFootprints) {
+      map.getSource("package-areas")?.setData(emptyFeatureCollection());
+      map.getSource("operator-footprints")?.setData(emptyFeatureCollection());
+      setOverlayCounts({ packageAreas: 0, operatorFootprints: 0 });
+      setLoadingOverlays(false);
+      return;
+    }
+
+    if (overlayRequestRef.current.timer) {
+      window.clearTimeout(overlayRequestRef.current.timer);
+    }
+    overlayRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = overlayRequestRef.current.id + 1;
+    overlayRequestRef.current = { id: requestId, controller, timer: null };
+
+    setLoadingOverlays(true);
+    overlayRequestRef.current.timer = window.setTimeout(() => {
+      getMapOverlays({
+        operator: filters.operator,
+        include_package_areas: includePackageAreas,
+        include_operator_footprints: includeOperatorFootprints,
+        limit: getOverlayLimit(map, filters.operator),
+        ...boundsToQuery(bounds),
+        signal: controller.signal,
+      })
+        .then((payload) => {
+          if (overlayRequestRef.current.id !== requestId) {
+            return;
+          }
+          map.getSource("package-areas")?.setData(payload.package_areas || emptyFeatureCollection());
+          map.getSource("operator-footprints")?.setData(payload.operator_footprints || emptyFeatureCollection());
+          setOverlayCounts({
+            packageAreas: payload.counts?.package_areas || 0,
+            operatorFootprints: payload.counts?.operator_footprints || 0,
+          });
+          setError("");
+        })
+        .catch((err) => {
+          if (err.name === "AbortError" || overlayRequestRef.current.id !== requestId) {
+            return;
+          }
+          map.getSource("package-areas")?.setData(emptyFeatureCollection());
+          map.getSource("operator-footprints")?.setData(emptyFeatureCollection());
+          setOverlayCounts({ packageAreas: 0, operatorFootprints: 0 });
+          setError(`Failed overlay load: ${err.message}`);
+        })
+        .finally(() => {
+          if (overlayRequestRef.current.id === requestId) {
+            setLoadingOverlays(false);
+          }
+        });
+    }, 150);
+  }, [filters.operator, mapReady, overlayVisibility, viewportToken]);
 
   useEffect(() => {
     if (!mapRef.current || !mapReady) {
@@ -915,6 +1179,10 @@ function App() {
     return [...new Set(statuses)];
   }, [filters.assetTypes, options]);
 
+  const currentZoom = mapRef.current?.getZoom() || initialUrlState.mapView.zoom || DEFAULT_ZOOM;
+  const packageLayersWaitingForZoom =
+    overlayVisibility.packageAreas && !filters.operator && currentZoom < PACKAGE_LAYER_MIN_ZOOM;
+
   return (
     <div className="shell">
       <aside className="left-rail">
@@ -1029,6 +1297,36 @@ function App() {
             ))}
           </div>
 
+          <div className="field">
+            <span>GIS Overlays</span>
+          </div>
+          <div className="toggle-group">
+            <button
+              type="button"
+              className={overlayVisibility.packageAreas ? "toggle active" : "toggle"}
+              onClick={() =>
+                setOverlayVisibility((current) => ({
+                  ...current,
+                  packageAreas: !current.packageAreas,
+                }))
+              }
+            >
+              Package Areas
+            </button>
+            <button
+              type="button"
+              className={overlayVisibility.operatorFootprints ? "toggle active" : "toggle"}
+              onClick={() =>
+                setOverlayVisibility((current) => ({
+                  ...current,
+                  operatorFootprints: !current.operatorFootprints,
+                }))
+              }
+            >
+              Operator Footprints
+            </button>
+          </div>
+
           <label className="checkbox">
             <input
               type="checkbox"
@@ -1047,11 +1345,16 @@ function App() {
             <div>Visible facilities: {formatNumber(counts.facilities)}</div>
             <div>Visible pipelines: {formatNumber(counts.pipelines)}</div>
             <div>Visible wells: {formatNumber(visibleWellTotal)}</div>
+            <div>Visible package areas: {formatNumber(overlayCounts.packageAreas)}</div>
+            <div>Visible operator footprints: {formatNumber(overlayCounts.operatorFootprints)}</div>
           </div>
           <div className="chip">Approx well points: {formatNumber(approximateWellCount)}</div>
+          {loadingOverlays ? <div className="chip">Refreshing overlays</div> : null}
           {wellLoadingState === "aggregated" ? (
             <div className="chip muted">Low zoom wells are aggregated</div>
           ) : null}
+          {packageLayersWaitingForZoom ? <div className="chip muted">Package areas appear when you zoom closer</div> : null}
+          <div className="chip muted">Package and footprint polygons are approximate DLS cells</div>
         </section>
 
         <section className="panel scroll-panel">

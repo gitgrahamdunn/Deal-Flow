@@ -18,6 +18,8 @@ from deal_flow_ingest.services.registry_queries import (
     get_combined_registry_map_frame,
     get_registry_filter_options,
     get_registry_map_layers,
+    get_registry_map_overlays,
+    get_operator_suggestions,
 )
 
 
@@ -105,10 +107,19 @@ def test_registry_filter_options_expose_frontend_choices(tmp_path: Path) -> None
 
     options = get_registry_filter_options()
 
-    assert "ALPHA ENERGY LTD" in options["operators"]
     assert "ACTIVE" in options["well_statuses"]
     assert "ACTIVE" in options["facility_statuses"]
     assert "Operating" in options["pipeline_statuses"]
+
+
+def test_operator_suggestions_support_query_and_limit(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+
+    rows = get_operator_suggestions("alpha", limit=5)
+
+    assert rows
+    assert "ALPHA ENERGY LTD" in rows
+    assert len(rows) <= 5
 
 
 def test_registry_pipeline_layer_exposes_line_geometry(tmp_path: Path) -> None:
@@ -143,6 +154,43 @@ def test_registry_pipeline_layer_simplifies_geometry_for_postgres_low_zoom(monke
 
     assert "ST_SimplifyPreserveTopology" in captured["sql"]
     assert "0.004" in captured["sql"]
+
+
+def test_registry_map_overlays_return_package_cells_and_operator_footprints(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+
+    payload = get_registry_map_overlays(operator="ALPHA ENERGY LTD")
+
+    assert payload["counts"]["package_areas"] >= 1
+    assert payload["counts"]["operator_footprints"] == 1
+    package_feature = payload["package_areas"]["features"][0]
+    footprint_feature = payload["operator_footprints"]["features"][0]
+
+    assert package_feature["geometry"]["type"] == "Polygon"
+    assert len(package_feature["geometry"]["coordinates"][0]) == 5
+    assert package_feature["properties"]["operator"] == "ALPHA ENERGY LTD"
+    assert footprint_feature["geometry"]["type"] == "MultiPolygon"
+    assert footprint_feature["properties"]["operator"] == "ALPHA ENERGY LTD"
+    assert footprint_feature["properties"]["visible_package_cells"] >= 1
+
+
+def test_registry_map_overlays_respect_bbox_and_overlay_selection(tmp_path: Path) -> None:
+    _build_sample_db(tmp_path)
+    alpha_bounds = registry_queries._get_area_bounds("10-01-050-08W4")
+    assert alpha_bounds is not None
+
+    payload = get_registry_map_overlays(
+        min_lat=alpha_bounds["south"] - 0.01,
+        max_lat=alpha_bounds["north"] + 0.01,
+        min_lon=alpha_bounds["west"] - 0.01,
+        max_lon=alpha_bounds["east"] + 0.01,
+        include_package_areas=False,
+        include_operator_footprints=True,
+    )
+
+    assert payload["counts"]["package_areas"] == 0
+    assert payload["counts"]["operator_footprints"] >= 1
+    assert all(feature["properties"]["operator"] == "ALPHA ENERGY LTD" for feature in payload["operator_footprints"]["features"])
 
 
 def test_registry_filters_normalize_and_cap_payloads(tmp_path: Path) -> None:
